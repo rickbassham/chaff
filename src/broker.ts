@@ -76,6 +76,33 @@ interface BrokerRequest {
   handle?: string;
 }
 
+/**
+ * Narrow untrusted parsed JSON to a {@link BrokerRequest} without an assertion.
+ * Returns the object unchanged when it has the request shape (an object with an
+ * optional string `op` and optional string `handle`), else `undefined` so the
+ * caller can reject it. Every field stays optional and is re-checked downstream.
+ */
+function asBrokerRequest(parsed: unknown): BrokerRequest | undefined {
+  if (typeof parsed !== 'object' || parsed === null) {
+    return undefined;
+  }
+  const { op, handle } = parsed as { op?: unknown; handle?: unknown };
+  const req: BrokerRequest = {};
+  if (op !== undefined) {
+    if (typeof op !== 'string') {
+      return undefined;
+    }
+    req.op = op;
+  }
+  if (handle !== undefined) {
+    if (typeof handle !== 'string') {
+      return undefined;
+    }
+    req.handle = handle;
+  }
+  return req;
+}
+
 /** Resolve the per-session directory's parent: $XDG_RUNTIME_DIR or os.tmpdir(). */
 function runtimeRoot(): string {
   const xdg = process.env.XDG_RUNTIME_DIR;
@@ -144,7 +171,8 @@ export function startBroker(options: BrokerOptions): Promise<Broker> {
         if (line.length > 0) {
           let response: unknown;
           try {
-            response = handleRequest(JSON.parse(line) as BrokerRequest);
+            const req = asBrokerRequest(JSON.parse(line));
+            response = req !== undefined ? handleRequest(req) : { error: 'bad request' };
           } catch {
             response = { error: 'bad request' };
           }

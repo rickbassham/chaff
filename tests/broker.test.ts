@@ -219,6 +219,16 @@ describe('ac-2: ops resolve / list / redaction-set', () => {
     expect(second).toEqual(first);
   });
 
+  it('a well-formed JSON value with the wrong shape (non-object, or non-string `op`/`handle`) is rejected with {error:"bad request"} rather than dispatched', async () => {
+    process.env.XDG_RUNTIME_DIR = tmp;
+    broker = await startBroker({ secrets: [secret('A_KEY', 'val-a')], auditLogPath: logPath });
+
+    for (const bad of [42, 'resolve', { op: 123 }, { op: 'resolve', handle: { nested: true } }]) {
+      const res = (await request(broker.sockPath, bad)) as { error?: string };
+      expect(res.error).toBe('bad request');
+    }
+  });
+
   it("redaction-set().handles contains the handle strings for the held secrets and redaction-set().patterns contains the secrets' real values (the precomputed pattern source for the scrubber)", async () => {
     process.env.XDG_RUNTIME_DIR = tmp;
     const secrets = [secret('A_KEY', 'val-a-secret'), secret('B_TOKEN', 'val-b-secret')];
