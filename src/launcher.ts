@@ -1,24 +1,38 @@
 /**
  * Layer A launcher — the `chaff run -- <harness cmd>` entry point.
  *
- * Ties policy + broker + handles together (PLAN.md "Layer A"):
+ * Ties policy + broker + handles together (PLAN.md "Layer A") under a
+ * **default-deny** posture (decision `chaff_decision_default_deny_env`):
  *
  *   1. snapshot the env at invocation time,
- *   2. classify each var via {@link classify},
- *   3. build a harness env where every secret value is replaced by a
- *      {@link formatHandle} handle and `CHAFF_SOCK` points at the broker socket,
+ *   2. classify each var via {@link classify} (now *advisory* — it suggests the
+ *      managed set; it is no longer load-bearing for safety),
+ *   3. sort each var into exactly one bucket and build the harness env —
+ *      **passthrough** (name on the effective allowlist → value verbatim),
+ *      **handle** (managed secret = detected-secret ∪ declared-managed →
+ *      {@link formatHandle}, real value seeded to the broker), or **dropped**
+ *      (neither → absent from the harness env entirely). `CHAFF_SOCK` points at
+ *      the broker socket,
  *   4. start the in-process {@link startBroker broker} holding the real values,
- *   5. print the launch banner of handled var names to stderr,
+ *   5. print the per-bucket launch banner to stderr (passthrough count, handle
+ *      names, dropped count, advisory warnings — names only, never values),
  *   6. spawn the harness with the handle env,
  *   7. tear the broker down when the harness exits, propagating its exit code.
  *
- * The broker (not the harness env) holds the real values; the harness only ever
- * sees handles plus the socket path. Handle resolution back into a child env is
- * `chaff exec` (DAR-1101, Phase 2) and is deliberately out of scope here.
+ * Fail-safe: a secret the heuristics miss *and* nobody allowlisted is dropped
+ * (a tool may break, visibly) — never leaked. The broker (not the harness env)
+ * holds the real values; the harness only ever sees handles plus the socket
+ * path. Handle resolution back into a child env is `chaff exec` (DAR-1101,
+ * Phase 2) and is deliberately out of scope here.
  *
  * The pure core ({@link buildHarnessEnv}, {@link formatLaunchBanner}) is split
  * from the I/O orchestration ({@link runLauncher}) so the env-building and
  * banner logic are unit-testable without spawning a process or a broker.
+ *
+ * Config loading of the allowlist / managed-secret set (user + folder, with the
+ * folder-trust guard) is DAR-1140; `chaff scan` three-bucket reporting is
+ * DAR-1141. Both are out of scope here — `declaredManaged` is just a parameter
+ * defaulting to empty.
  */
 
 import { spawn } from 'node:child_process';
@@ -29,71 +43,204 @@ import { formatHandle } from './handles.js';
 import { classify, type Classification, type EnvSnapshot } from './policy.js';
 import { startBroker, type BrokerSecret } from './broker.js';
 
-/** The result of turning an env snapshot into a harness env. */
+/**
+ * The default passthrough allowlist: env-var names handed to the harness
+ * verbatim under the default-deny model. Entries are either literal names or
+ * `*`-globs (only `*` is special, as in policy globs). Anything not matched
+ * here and not a managed secret is **dropped** from the harness env.
+ *
+ * The set is intentionally minimal and benign — terminal/locale/path plumbing a
+ * shell and ordinary tools need to function, none of which carries a secret. A
+ * value that happens to match here but also looks secret is still handled, not
+ * passed (see the precedence rule in {@link buildHarnessEnv}). User/folder
+ * config extends this set later (DAR-1140); here it is just the shipped default.
+ */
+export const DEFAULT_PASSTHROUGH_ALLOWLIST: readonly string[] = [
+  'PATH',
+  'HOME',
+  'SHELL',
+  'TERM',
+  'LANG',
+  'LC_*',
+  'TZ',
+  'TMPDIR',
+  'USER',
+  'LOGNAME',
+  'PWD',
+  'XDG_*',
+];
+
+/** Convert a single allowlist entry into an anchored regex. Only `*` is special. */
+function entryToRegExp(entry: string): RegExp {
+  const escaped = entry.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`);
+}
+
+/** Build a name-matcher from an allowlist of literal names and `*`-globs. */
+function allowlistMatcher(allowlist: readonly string[]): (name: string) => boolean {
+  const patterns = allowlist.map(entryToRegExp);
+  return (name: string) => patterns.some((re) => re.test(name));
+}
+
+/** The result of turning an env snapshot into a harness env (default-deny). */
 export interface HarnessEnvBuild {
   /**
-   * The env to hand the harness: every secret var's value replaced by its
-   * handle, every non-secret var passed through unchanged, plus `CHAFF_SOCK`.
+   * The env to hand the harness: passthrough vars verbatim, managed-secret vars
+   * as handles, plus `CHAFF_SOCK`. Dropped vars are absent entirely (name and
+   * value).
    */
   env: Record<string, string>;
-  /** One {@link BrokerSecret} per secret var, to seed the broker with. */
+  /** One {@link BrokerSecret} per handle var, to seed the broker with. */
   secrets: BrokerSecret[];
+  /** Names passed through verbatim (allowlisted, not a managed secret). Sorted. */
+  passthrough: string[];
+  /** Names replaced by handles (detected-secret ∪ declared-managed). Sorted. */
+  handles: string[];
+  /** Names dropped entirely (neither allowlisted nor a managed secret). Sorted. */
+  dropped: string[];
+  /**
+   * Advisory warnings (by NAME, never a value) — currently one per
+   * allowlisted-but-secret-looking var that was handled rather than passed
+   * through (the precedence rule). The launcher surfaces these in the banner.
+   */
+  warnings: string[];
+}
+
+/** Inputs to {@link buildHarnessEnv}. */
+export interface BuildHarnessEnvOptions {
+  /** The env snapshot to sort into buckets. Taken by value. */
+  snapshot: EnvSnapshot;
+  /**
+   * The advisory classification (from {@link classify}) used to identify
+   * detected secrets. Demoted from load-bearing to advisory: it only suggests
+   * the managed set, it never causes a value to pass through.
+   */
+  classification: Classification;
+  /**
+   * The effective passthrough allowlist (literal names and `*`-globs). Callers
+   * pass {@link DEFAULT_PASSTHROUGH_ALLOWLIST} (optionally extended by config).
+   */
+  allowlist: readonly string[];
+  /**
+   * Names explicitly declared as managed secrets, handled even when the
+   * detector does not flag them. Defaults to empty — user/folder config
+   * plumbing is DAR-1140.
+   */
+  declaredManaged?: readonly string[];
+  /** Value for `CHAFF_SOCK` — the only added key; never a secret or token. */
+  sockPath: string;
 }
 
 /**
- * Build the harness env and the broker's secret list from a snapshot and its
- * classification. Pure: takes the snapshot by value (the returned env is a fresh
- * object), so mutating the caller's snapshot afterward never changes the result.
+ * Build the harness env and the broker's secret list from a snapshot, under the
+ * default-deny model. Pure: takes the snapshot by value (the returned env is a
+ * fresh object), so mutating the caller's snapshot afterward never changes the
+ * result.
  *
- * For each var: if classified secret, mint a handle for its NAME, put the handle
- * in the env, and record a {@link BrokerSecret} carrying the real value. Other
- * vars pass through unchanged. `CHAFF_SOCK` is set to `sockPath` — the only
- * extra key, and never a secret value or auth token.
+ * Each var lands in exactly one bucket:
+ *   - **handle** if it is a managed secret (detected-secret ∪ declared-managed).
+ *     This is checked FIRST so an allowlisted-but-secret-looking var is handled,
+ *     not passed (the precedence rule) — and an advisory warning naming it (by
+ *     NAME only) is emitted. Carve-out: a var detected solely by the *entropy*
+ *     backstop (a value-guess, not a name signal) does NOT win over an explicit
+ *     allowlist entry — the allowlisted name is authoritative, so it passes
+ *     through verbatim with no warning. Name-glob and declared-managed matches
+ *     are intentional secret signals and still take precedence.
+ *   - **passthrough** if its name matches the effective allowlist → value
+ *     verbatim.
+ *   - **dropped** otherwise → absent from the harness env (name and value).
+ *
+ * `CHAFF_SOCK` is always set to `sockPath` — the only extra key, never a secret
+ * value or auth token, present even when every var is dropped.
  */
-export function buildHarnessEnv(
-  snapshot: EnvSnapshot,
-  classification: Classification,
-  sockPath: string,
-): HarnessEnvBuild {
+export function buildHarnessEnv(options: BuildHarnessEnvOptions): HarnessEnvBuild {
+  const { snapshot, classification, allowlist, sockPath } = options;
+  const declaredManaged = new Set(options.declaredManaged ?? []);
+  const isAllowlisted = allowlistMatcher(allowlist);
+
   const env: Record<string, string> = {};
   const secrets: BrokerSecret[] = [];
+  const passthrough: string[] = [];
+  const handles: string[] = [];
+  const dropped: string[] = [];
+  const warnings: string[] = [];
 
   for (const [name, value] of Object.entries(snapshot)) {
-    if (classification[name]?.secret === true) {
+    const verdict = classification[name];
+    const allowlisted = isAllowlisted(name);
+    // The entropy backstop is a value-guess, not a name signal: a long
+    // high-entropy value (e.g. a realistic macOS TMPDIR `/var/folders/...`)
+    // trips it. An explicit allowlist entry is a deliberate name signal and must
+    // beat that guess — otherwise a documented passthrough var is demoted to a
+    // handle the harness cannot resolve (resolution is Phase 2, DAR-1101).
+    // Name-glob and declared-managed matches are NOT carved out: those are
+    // intentional secret signals, so the precedence rule still handles them.
+    const detectedSecret =
+      verdict?.secret === true && !(verdict.mechanism === 'entropy' && allowlisted);
+    const managed = detectedSecret || declaredManaged.has(name);
+
+    if (managed) {
+      // Handle bucket wins over passthrough: never pass a secret-looking value
+      // through. If it was also allowlisted, that is the precedence case — warn.
       const handle = formatHandle(name);
       env[name] = handle;
       secrets.push({ name, value, handle });
-    } else {
+      handles.push(name);
+      if (allowlisted) {
+        warnings.push(
+          `${name} is on the passthrough allowlist but looks like a secret — handled instead of passed through`,
+        );
+      }
+    } else if (allowlisted) {
       env[name] = value;
+      passthrough.push(name);
+    } else {
+      // Dropped: absent from the harness env entirely (name and value).
+      dropped.push(name);
     }
   }
 
   env.CHAFF_SOCK = sockPath;
-  return { env, secrets };
+  passthrough.sort();
+  handles.sort();
+  dropped.sort();
+  return { env, secrets, passthrough, handles, dropped, warnings };
 }
 
 /**
- * Render the launch banner: which vars became handles, by NAME only (never a
- * value). Written to stderr by {@link runLauncher} so it cannot contaminate the
- * harness's stdout.
+ * Render the per-bucket launch banner from a {@link buildHarnessEnv} result:
+ * passthrough as a COUNT, handles by NAME, dropped as a COUNT, plus any advisory
+ * warnings (by NAME). Never emits an env VALUE. Written to stderr by
+ * {@link runLauncher} so it cannot contaminate the harness's stdout.
  *
- * Structured as discrete lines so the redaction-gate skip line ("push-scrub OFF
- * for X") can be appended when that gate lands (DAR-1099, Phase 3) without
- * reworking this format.
+ * Passthrough is count-only by design — only handles are listed by name, so a
+ * long benign env does not bury the security-relevant lines, and no passthrough
+ * name (which a value could be confused with) is printed. Structured as discrete
+ * lines so the redaction-gate skip line (DAR-1099, Phase 3) can be appended
+ * later without reworking this format.
  */
-export function formatLaunchBanner(classification: Classification): string {
-  const handled = Object.keys(classification)
-    .filter((name) => classification[name]!.secret)
-    .sort();
+export function formatLaunchBanner(build: HarnessEnvBuild): string {
+  const lines = ['chaff: building default-deny harness env'];
+  lines.push(`  passthrough: ${build.passthrough.length} var(s) passed through verbatim`);
 
-  const lines = ['chaff: launching harness with secret values replaced by handles'];
-  if (handled.length === 0) {
-    lines.push('  (no vars classified as secret)');
+  if (build.handles.length === 0) {
+    lines.push('  handles: (none)');
   } else {
-    for (const name of handled) {
-      lines.push(`  handle: ${name}`);
+    lines.push('  handles (real values held by the broker):');
+    for (const name of build.handles) {
+      lines.push(`    ${name}`);
     }
   }
+
+  lines.push(`  dropped: ${build.dropped.length} var(s) withheld from the harness env`);
+
+  if (build.warnings.length > 0) {
+    lines.push('  advisory:');
+    for (const warning of build.warnings) {
+      lines.push(`    ${warning}`);
+    }
+  }
+
   return lines.join('\n') + '\n';
 }
 
@@ -165,12 +312,19 @@ export function runLauncher(options: LauncherOptions): Promise<number> {
   // same strings placed in the harness env — a second build would mint fresh
   // nonces and the broker could not resolve the env's handles. CHAFF_SOCK is the
   // only field that depends on the (not-yet-known) sockPath; patch it in after
-  // the broker starts rather than rebuilding.
-  const { env, secrets } = buildHarnessEnv(snapshot, classification, '');
+  // the broker starts rather than rebuilding. The allowlist is the shipped
+  // default and declaredManaged is empty here — config plumbing is DAR-1140.
+  const build = buildHarnessEnv({
+    snapshot,
+    classification,
+    allowlist: DEFAULT_PASSTHROUGH_ALLOWLIST,
+    sockPath: '',
+  });
+  const { env, secrets } = build;
 
   return startBroker({ secrets, auditLogPath: options.auditLogPath }).then((broker) => {
     env.CHAFF_SOCK = broker.sockPath;
-    stderr.write(formatLaunchBanner(classification));
+    stderr.write(formatLaunchBanner(build));
 
     return new Promise<number>((resolve, reject) => {
       const child = spawn(command, args, { env, stdio: 'inherit' });

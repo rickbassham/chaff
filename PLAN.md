@@ -33,8 +33,10 @@ transform it or open its own socket. Best-effort scrubbing is the right bar.
 
 ### Two leak channels (drives the whole design)
 
-1. **Pull** — LLM runs `env` / `echo $KEY` / `cat .env`. Fixed by _handle
-   substitution_: the harness env holds references, not values.
+1. **Pull** — LLM runs `env` / `echo $KEY` / `cat .env`. Fixed by a
+   _default-deny_ harness env (see "Layer A" below): only allowlisted vars pass
+   through verbatim, managed secrets become handles, and everything else is
+   dropped — so the harness env holds references or nothing, never raw values.
 2. **Push** — a child process _emits_ the secret (stack trace with a DB URL,
    debug log). Fixed _only_ by _egress scrubbing_: a filter that knows the real
    values and redacts them before capture.
@@ -55,9 +57,9 @@ the child and scrubs the child's stdout/stderr upstream of capture.
 ```mermaid
 flowchart TD
     subgraph launch["chaff run -- claude  (layer A)"]
-      P[policy: classify env by name globs<br/>+ allowlist + entropy backstop]
+      P[default-deny sort:<br/>allowlist -&gt; passthrough verbatim;<br/>managed secret -&gt; handle;<br/>else -&gt; drop. heuristics advisory]
       B[(broker:<br/>unix socket in 0700 dir, 0600 mode,<br/>holds real values, audit log)]
-      H[spawn harness with secret vars<br/>replaced by handles<br/>chaff:1:NAME:nonce]
+      H[spawn harness with the built env:<br/>handles chaff:1:NAME:nonce + allowlisted<br/>vars verbatim; unlisted vars absent]
       P --> B --> H
     end
 
@@ -77,6 +79,45 @@ flowchart TD
     B -. resolve / redaction-set .-> EXEC
     HOOK -->|deny reads of .env/*.pem/id_*| LLM
 ```
+
+## Layer A — default-deny harness env
+
+`chaff run` builds the harness env under a **default-deny** posture (decision
+`chaff_decision_default_deny_env`). Each var in the launch-time env snapshot is
+sorted into exactly one of three buckets:
+
+- **passthrough** — name is on the effective allowlist → value passed through
+  **verbatim**. The shipped default allowlist is the benign terminal/locale/path
+  plumbing a shell and ordinary tools need: `PATH`, `HOME`, `SHELL`, `TERM`,
+  `LANG`, `LC_*`, `TZ`, `TMPDIR`, `USER`, `LOGNAME`, `PWD`, `XDG_*`. User/folder
+  config extends this set later (DAR-1140).
+- **handle** — a managed secret (**detected-secret ∪ declared-managed**) →
+  replaced by a `chaff:1:NAME:nonce` handle, the real value seeded to the
+  broker. `declaredManaged` is a parameter here, defaulting to empty.
+- **dropped** — neither allowlisted nor a managed secret → **absent** from the
+  harness env entirely (both name and value). `CHAFF_SOCK` is always added.
+
+This is the deliberate inversion of the earlier denylist framing (DAR-1094 /
+DAR-1100, where every non-secret var passed through verbatim). The detection
+heuristics (globs / allowlist / entropy in `policy.ts`) are **reused but
+demoted from load-bearing to advisory**: they suggest the managed set and raise
+a tripwire warning, but they no longer decide what is safe to expose.
+
+**Fail-safe over fail-open.** A secret the heuristics miss _and_ nobody
+allowlisted is **dropped** — a tool may break, visibly — rather than leaked.
+**Precedence:** a var that is both allowlisted _and_ detected-secret by a
+**name signal** (a secret-shaped glob like `*_TOKEN`, or declared-managed) is
+treated as a **handle** (never pass a secret-looking value through), with an
+advisory warning naming it. The one carve-out is the **entropy backstop**: it
+guesses from the _value_, not the name, and a long high-entropy value is exactly
+what allowlisted path vars like `TMPDIR` (`/var/folders/...`) and `XDG_RUNTIME_DIR`
+carry. An explicit allowlist entry is a deliberate name signal and therefore
+beats an entropy-only guess — such a var passes through verbatim with no warning,
+rather than being demoted to a handle the harness cannot yet resolve (resolution
+is Phase 2, DAR-1101). A non-allowlisted entropy-flagged var is still handled.
+The launch banner reports per bucket — passthrough **count**,
+handle **names**, dropped **count**, plus advisory warnings — names only, never
+values, to stderr so it cannot contaminate the harness's stdout.
 
 ## Project layout (mirror commonplace's shape)
 
