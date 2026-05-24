@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseInvocation, UsageError, USAGE } from '../cli.js';
 import { runLauncher, defaultAuditLogPath } from '../launcher.js';
+import { runScan } from '../scan.js';
 
 /**
  * Dispatch one invocation. Returns a number for synchronous commands or a
@@ -27,6 +28,12 @@ function main(argv: string[]): number | Promise<number> {
       return 2;
     }
     return runLauncher({ argv: args, auditLogPath: defaultAuditLogPath() });
+  }
+
+  if (invocation.command === 'scan') {
+    // `chaff scan`: classification dry-run. Reads process.env, prints the
+    // report to stdout, starts no broker, and spawns nothing.
+    return runScan();
   }
 
   // Phase 0 scaffold: the remaining commands are wired but not implemented. Each

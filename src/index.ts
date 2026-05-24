@@ -5,3 +5,4 @@ export * from './cli.js';
 export * from './handles.js';
 export * from './launcher.js';
 export * from './policy.js';
+export * from './scan.js';
