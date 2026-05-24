@@ -175,7 +175,7 @@ describe('ac-2: ops resolve / list / redaction-set', () => {
     expect(res.value).toBe('sk-real-value-123');
   });
 
-  it('resolve of an unknown/unregistered handle returns an error/absent result and does NOT return any other secret\'s value', async () => {
+  it("resolve of an unknown/unregistered handle returns an error/absent result and does NOT return any other secret's value", async () => {
     process.env.XDG_RUNTIME_DIR = tmp;
     broker = await startBroker({ secrets: [secret('A_KEY', 'val-a')], auditLogPath: logPath });
 
@@ -300,7 +300,7 @@ describe('ac-3: every resolve is audit-logged', () => {
 });
 
 describe('ac-4: only CHAFF_SOCK exported, never a token/secret', () => {
-  it('the broker\'s published connection info exposes only the socket path as CHAFF_SOCK and exposes no auth token field', async () => {
+  it("the broker's published connection info exposes only the socket path as CHAFF_SOCK and exposes no auth token field", async () => {
     process.env.XDG_RUNTIME_DIR = tmp;
     broker = await startBroker({ secrets: [secret('A_KEY', 'val-a')], auditLogPath: logPath });
 
@@ -321,7 +321,7 @@ describe('ac-4: only CHAFF_SOCK exported, never a token/secret', () => {
 });
 
 describe('ac-5: torn down on process exit — no stale socket or orphan', () => {
-  it('calling the broker\'s close/teardown removes the socket file and the per-session directory from disk', async () => {
+  it("calling the broker's close/teardown removes the socket file and the per-session directory from disk", async () => {
     process.env.XDG_RUNTIME_DIR = tmp;
     broker = await startBroker({ secrets: [secret('A_KEY', 'val-a')], auditLogPath: logPath });
     const sockPath = broker.sockPath;
@@ -383,7 +383,7 @@ describe('ac-5: torn down on process exit — no stale socket or orphan', () => 
 });
 
 describe('ac-6: explicit perms + resolve/list summary assertions', () => {
-  it('explicit assertion that the session dir is 0700 and the socket is 0600 — the exact mode bits that restrict access to the owning uid (group/other have no access), satisfying the AC\'s same-uid-perms requirement', async () => {
+  it("explicit assertion that the session dir is 0700 and the socket is 0600 — the exact mode bits that restrict access to the owning uid (group/other have no access), satisfying the AC's same-uid-perms requirement", async () => {
     process.env.XDG_RUNTIME_DIR = tmp;
     broker = await startBroker({ secrets: [secret('A_KEY', 'val-a')], auditLogPath: logPath });
     const sessionDir = join(broker.sockPath, '..');
