@@ -50,7 +50,10 @@ afterEach(() => {
 });
 
 /** Run `chaff scan` via the built binary; return {stdout, stderr, status}. */
-function runChaffScan(extraEnv: Record<string, string>, cwd?: string): {
+function runChaffScan(
+  extraEnv: Record<string, string>,
+  cwd?: string,
+): {
   stdout: string;
   stderr: string;
   status: number;

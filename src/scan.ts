@@ -128,10 +128,7 @@ export function buildScanReport(options: BuildScanReportOptions): ScanReport {
  * appended later without reworking this format.
  */
 export function formatScanReport(report: ScanReport): string {
-  const lines = [
-    'chaff scan: default-deny dry-run (no harness or broker is started)',
-    '',
-  ];
+  const lines = ['chaff scan: default-deny dry-run (no harness or broker is started)', ''];
 
   appendSection(lines, 'Passes through unchanged:', report.passthrough);
   lines.push('');
