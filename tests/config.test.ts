@@ -18,13 +18,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  loadUserConfig,
-  loadFolderConfig,
-  mergeConfig,
-  writeConfig,
-  type LevelConfig,
-} from '../src/config.js';
+import { loadUserConfig, loadFolderConfig, mergeConfig, type LevelConfig } from '../src/config.js';
+import { writeConfig } from './helpers/config-seed.js';
 
 let tmp: string;
 
@@ -162,6 +157,16 @@ describe('ac-2: defaults→user→folder merge', () => {
     });
     expect(effective.allowlist).not.toContain('HOME');
     expect(effective.allowlist).toContain('PATH');
+  });
+
+  it('a var named in the user never-pass set is excluded from declared-managed even when a folder config declares it managed (never-pass means fully absent, not a broker handle)', () => {
+    const effective = mergeConfig({
+      defaults: DEFAULTS,
+      user: { allowlist: [], declaredManaged: [], neverPass: ['BLOCKED'] },
+      folder: { allowlist: [], declaredManaged: ['BLOCKED'] },
+      snapshot: {},
+    });
+    expect(effective.declaredManaged).not.toContain('BLOCKED');
   });
 });
 

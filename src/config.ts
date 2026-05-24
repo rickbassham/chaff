@@ -31,7 +31,7 @@
  * is DAR-1141.
  */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { classify, type EnvSnapshot } from './policy.js';
 
@@ -74,7 +74,11 @@ export interface EffectiveConfig {
    * allowlists, minus the user never-pass set. Sorted.
    */
   allowlist: string[];
-  /** The effective declared-managed set: union of user and folder. Sorted. */
+  /**
+   * The effective declared-managed set: union of user and folder, minus the
+   * user never-pass set (so a user-blocked var is fully absent, never converted
+   * to a broker handle). Sorted.
+   */
   declaredManaged: string[];
   /**
    * Folder-trust warnings (by NAME, never a value) — one per folder allowlist
@@ -102,15 +106,6 @@ function asStringArray(value: unknown): string[] {
     return [];
   }
   return value.filter((item): item is string => typeof item === 'string');
-}
-
-/**
- * Write `config` as JSON into the chaff config directory `dir` (which must
- * already exist). Used by tests to seed config without pinning the on-disk
- * format into assertions; production reads via the loaders below.
- */
-export function writeConfig(dir: string, config: Partial<LevelConfig>): void {
-  writeFileSync(join(dir, CONFIG_FILENAME), JSON.stringify(config), 'utf8');
 }
 
 /**
@@ -169,7 +164,9 @@ export function loadFolderConfig(cwd: string): LevelConfig {
  * Merge defaults→user→folder into the effective config. The effective allowlist
  * is the union of all three allowlist sources minus the user never-pass set
  * (which beats every source, including the shipped defaults). The declared-
- * managed set is the union of user and folder. Folder allowlist entries whose
+ * managed set is the union of user and folder, also minus the user never-pass
+ * set — so a user-blocked var is fully absent, not converted to a broker
+ * handle. Folder allowlist entries whose
  * value trips the secret heuristics raise a NAME-only warning (the folder-trust
  * guard); user-level entries do not (the guard is folder-scoped).
  */
@@ -180,7 +177,9 @@ export function mergeConfig(options: MergeConfigOptions): EffectiveConfig {
   const allowlist = [...defaults, ...user.allowlist, ...folder.allowlist].filter(
     (name) => !neverPass.has(name),
   );
-  const declaredManaged = [...user.declaredManaged, ...folder.declaredManaged];
+  const declaredManaged = [...user.declaredManaged, ...folder.declaredManaged].filter(
+    (name) => !neverPass.has(name),
+  );
 
   // Folder-trust guard: warn for any folder-allowlisted var whose value trips
   // the secret heuristics for the current snapshot. classify() is the same

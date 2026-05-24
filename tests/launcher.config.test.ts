@@ -14,8 +14,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { isHandle } from '../src/handles.js';
-import { writeConfig, type LevelConfig } from '../src/config.js';
+import { type LevelConfig } from '../src/config.js';
 import { runLauncher } from '../src/launcher.js';
+import { writeConfig } from './helpers/config-seed.js';
 
 let tmp: string;
 let logPath: string;
