@@ -265,6 +265,75 @@ describe('ac-3: precedence — allowlisted AND detected-secret → handle + advi
   });
 });
 
+describe('ac-3: precedence carve-out — entropy-only match does NOT beat an explicit allowlist', () => {
+  // A realistic macOS TMPDIR: long, high per-char entropy → the advisory entropy
+  // backstop flags it secret (mechanism "entropy"), but it is on the documented
+  // passthrough allowlist. A value-entropy guess must not demote an explicitly
+  // allowlisted var to a handle the harness cannot resolve (resolution is Phase 2).
+  const realisticTmpdir = '/var/folders/3x/9zq8h2_n1bs0gk5x7lp4tq9w0000gn/T/';
+
+  it('sanity: the entropy backstop flags a realistic TMPDIR value secret via the "entropy" mechanism', () => {
+    const snapshot = { TMPDIR: realisticTmpdir };
+    const c = classify(snapshot, {});
+    expect(c.TMPDIR!.secret).toBe(true);
+    expect(c.TMPDIR!.mechanism).toBe('entropy');
+  });
+
+  it('an entropy-flagged but allowlisted var (TMPDIR) is passed through verbatim, not handled', () => {
+    const snapshot = { TMPDIR: realisticTmpdir };
+    const { env, passthrough, handles } = buildHarnessEnv({
+      snapshot,
+      classification: classify(snapshot, {}),
+      allowlist: DEFAULT_PASSTHROUGH_ALLOWLIST,
+      sockPath: SOCK,
+    });
+    expect(env.TMPDIR).toBe(realisticTmpdir);
+    expect(passthrough).toContain('TMPDIR');
+    expect(handles).not.toContain('TMPDIR');
+    expect(isHandle(env.TMPDIR!)).toBe(false);
+  });
+
+  it('the entropy carve-out raises no advisory warning (the allowlist name is authoritative, nothing to flag)', () => {
+    const snapshot = { TMPDIR: realisticTmpdir };
+    const { warnings } = buildHarnessEnv({
+      snapshot,
+      classification: classify(snapshot, {}),
+      allowlist: DEFAULT_PASSTHROUGH_ALLOWLIST,
+      sockPath: SOCK,
+    });
+    expect(warnings.join('\n')).not.toContain('TMPDIR');
+  });
+
+  it('the carve-out is entropy-only: a glob-detected secret (API_TOKEN) on the allowlist is STILL handled with an advisory', () => {
+    const snapshot = { API_TOKEN: 'real-token-value-789' };
+    const classification = classify(snapshot, {});
+    expect(classification.API_TOKEN!.mechanism).toBe('glob');
+    const { env, handles, warnings } = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: ['API_TOKEN'],
+      sockPath: SOCK,
+    });
+    expect(isHandle(env.API_TOKEN!)).toBe(true);
+    expect(handles).toContain('API_TOKEN');
+    expect(warnings.join('\n')).toContain('API_TOKEN');
+  });
+
+  it('a non-allowlisted entropy-flagged var is still handled (the carve-out only applies to allowlisted names)', () => {
+    const snapshot = { SOME_RANDOM_BLOB: 'aZ9qX2pL7mK4nB8vC1tR' };
+    const classification = classify(snapshot, {});
+    expect(classification.SOME_RANDOM_BLOB!.mechanism).toBe('entropy');
+    const { env, handles } = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: [],
+      sockPath: SOCK,
+    });
+    expect(isHandle(env.SOME_RANDOM_BLOB!)).toBe(true);
+    expect(handles).toContain('SOME_RANDOM_BLOB');
+  });
+});
+
 describe('ac-4: documented default passthrough allowlist', () => {
   const LITERALS = [
     'PATH',

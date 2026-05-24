@@ -141,7 +141,11 @@ export interface BuildHarnessEnvOptions {
  *   - **handle** if it is a managed secret (detected-secret ∪ declared-managed).
  *     This is checked FIRST so an allowlisted-but-secret-looking var is handled,
  *     not passed (the precedence rule) — and an advisory warning naming it (by
- *     NAME only) is emitted.
+ *     NAME only) is emitted. Carve-out: a var detected solely by the *entropy*
+ *     backstop (a value-guess, not a name signal) does NOT win over an explicit
+ *     allowlist entry — the allowlisted name is authoritative, so it passes
+ *     through verbatim with no warning. Name-glob and declared-managed matches
+ *     are intentional secret signals and still take precedence.
  *   - **passthrough** if its name matches the effective allowlist → value
  *     verbatim.
  *   - **dropped** otherwise → absent from the harness env (name and value).
@@ -162,9 +166,18 @@ export function buildHarnessEnv(options: BuildHarnessEnvOptions): HarnessEnvBuil
   const warnings: string[] = [];
 
   for (const [name, value] of Object.entries(snapshot)) {
-    const detectedSecret = classification[name]?.secret === true;
-    const managed = detectedSecret || declaredManaged.has(name);
+    const verdict = classification[name];
     const allowlisted = isAllowlisted(name);
+    // The entropy backstop is a value-guess, not a name signal: a long
+    // high-entropy value (e.g. a realistic macOS TMPDIR `/var/folders/...`)
+    // trips it. An explicit allowlist entry is a deliberate name signal and must
+    // beat that guess — otherwise a documented passthrough var is demoted to a
+    // handle the harness cannot resolve (resolution is Phase 2, DAR-1101).
+    // Name-glob and declared-managed matches are NOT carved out: those are
+    // intentional secret signals, so the precedence rule still handles them.
+    const detectedSecret =
+      verdict?.secret === true && !(verdict.mechanism === 'entropy' && allowlisted);
+    const managed = detectedSecret || declaredManaged.has(name);
 
     if (managed) {
       // Handle bucket wins over passthrough: never pass a secret-looking value
