@@ -15,7 +15,7 @@ install: ## Install dependencies with frozen lockfile
 build: ## Build the project (TypeScript -> dist/)
 	pnpm build
 
-test: ## Run the full test suite
+test: build ## Run the full test suite (builds first; the e2e tests exercise dist/)
 	pnpm test
 
 typecheck: ## Run TypeScript type checker (tsc --noEmit)
