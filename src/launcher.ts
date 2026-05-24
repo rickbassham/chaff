@@ -156,7 +156,9 @@ export function runLauncher(options: LauncherOptions): Promise<number> {
   const classification = classify(snapshot, {});
   const [command, ...args] = options.argv;
   if (command === undefined) {
-    throw new Error('chaff run: no harness command given after --');
+    // Reject rather than throw synchronously so the Promise<number> signature
+    // holds for direct library callers (the bin entry already guards empty argv).
+    return Promise.reject(new Error('chaff run: no harness command given after --'));
   }
 
   // Build env + secrets ONCE so the handles seeded into the broker are the very
