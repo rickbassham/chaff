@@ -22,6 +22,15 @@ function seededSnapshot(): Record<string, string> {
   };
 }
 
+/**
+ * The allowlist these DAR-1100 mechanics tests pass so the snapshot's
+ * non-secret vars (PATH, EDITOR) are bucketed passthrough rather than dropped —
+ * letting these tests keep verifying the snapshot/classify/broker/spawn/teardown
+ * plumbing that predates the default-deny model (DAR-1139). End-to-end
+ * `runLauncher` tests use the shipped default allowlist instead.
+ */
+const PASSTHROUGH_ALL = ['PATH', 'EDITOR'];
+
 let tmp: string;
 let logPath: string;
 let savedXdg: string | undefined;
@@ -47,10 +56,15 @@ afterEach(() => {
 });
 
 describe('ac-1: snapshot, classify, build handle env + CHAFF_SOCK, spawn', () => {
-  it('given a seeded env snapshot, every var policy.classify marks secret=true is replaced in the built harness env by a value that isHandle() accepts; non-secret vars are passed through with their original value unchanged', () => {
+  it('given a seeded env snapshot, every var policy.classify marks secret=true is replaced in the built harness env by a value that isHandle() accepts; non-secret allowlisted vars are passed through with their original value unchanged', () => {
     const snapshot = seededSnapshot();
     const classification = classify(snapshot, {});
-    const { env } = buildHarnessEnv(snapshot, classification, '/tmp/sock');
+    const { env } = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: PASSTHROUGH_ALL,
+      sockPath: '/tmp/sock',
+    });
 
     for (const [name, value] of Object.entries(snapshot)) {
       if (classification[name]!.secret) {
@@ -65,10 +79,20 @@ describe('ac-1: snapshot, classify, build handle env + CHAFF_SOCK, spawn', () =>
     process.env.XDG_RUNTIME_DIR = tmp;
     const snapshot = seededSnapshot();
     const classification = classify(snapshot, {});
-    const { secrets } = buildHarnessEnv(snapshot, classification, 'placeholder');
+    const { secrets } = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: PASSTHROUGH_ALL,
+      sockPath: 'placeholder',
+    });
     broker = await startBroker({ secrets, auditLogPath: logPath });
 
-    const { env } = buildHarnessEnv(snapshot, classification, broker.sockPath);
+    const { env } = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: PASSTHROUGH_ALL,
+      sockPath: broker.sockPath,
+    });
     expect(env.CHAFF_SOCK).toBe(broker.sockPath);
     // It is a path string, not a secret value.
     for (const value of Object.values(snapshot)) {
@@ -82,7 +106,12 @@ describe('ac-1: snapshot, classify, build handle env + CHAFF_SOCK, spawn', () =>
   it("each handle placed in the harness env carries the originating var's NAME segment (parseHandle(handleEnv[NAME]).name === NAME), so the harness env maps each secret name to its own handle", () => {
     const snapshot = seededSnapshot();
     const classification = classify(snapshot, {});
-    const { env } = buildHarnessEnv(snapshot, classification, '/tmp/sock');
+    const { env } = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: PASSTHROUGH_ALL,
+      sockPath: '/tmp/sock',
+    });
 
     for (const [name, verdict] of Object.entries(classification)) {
       if (verdict.secret) {
@@ -95,7 +124,12 @@ describe('ac-1: snapshot, classify, build handle env + CHAFF_SOCK, spawn', () =>
     process.env.XDG_RUNTIME_DIR = tmp;
     const snapshot = seededSnapshot();
     const classification = classify(snapshot, {});
-    const { env, secrets } = buildHarnessEnv(snapshot, classification, 'placeholder');
+    const { env, secrets } = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: PASSTHROUGH_ALL,
+      sockPath: 'placeholder',
+    });
 
     const secretNames = Object.keys(classification).filter((n) => classification[n]!.secret);
     expect(secrets.map((s) => s.name).sort()).toEqual([...secretNames].sort());
@@ -148,7 +182,12 @@ describe('ac-1: snapshot, classify, build handle env + CHAFF_SOCK, spawn', () =>
     const classification = classify(snapshot, {});
     // buildHarnessEnv takes the snapshot by value; mutating the source object
     // afterward does not change the already-built env.
-    const { env } = buildHarnessEnv(snapshot, classification, '/tmp/sock');
+    const { env } = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: PASSTHROUGH_ALL,
+      sockPath: '/tmp/sock',
+    });
     delete snapshot.OPENAI_API_KEY;
     expect(isHandle(env.OPENAI_API_KEY!)).toBe(true);
   });
@@ -158,7 +197,12 @@ describe('ac-2: broker holds real values; harness env handles-only + CHAFF_SOCK'
   it("for every secret-classified var, the var's real value string does NOT appear anywhere in the serialized harness env", () => {
     const snapshot = seededSnapshot();
     const classification = classify(snapshot, {});
-    const { env } = buildHarnessEnv(snapshot, classification, '/tmp/sock');
+    const { env } = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: PASSTHROUGH_ALL,
+      sockPath: '/tmp/sock',
+    });
     const serialized = JSON.stringify(env);
     for (const [name, verdict] of Object.entries(classification)) {
       if (verdict.secret) {
@@ -170,7 +214,12 @@ describe('ac-2: broker holds real values; harness env handles-only + CHAFF_SOCK'
   it('for every secret-classified var, the harness env value for that var name passes isHandle()', () => {
     const snapshot = seededSnapshot();
     const classification = classify(snapshot, {});
-    const { env } = buildHarnessEnv(snapshot, classification, '/tmp/sock');
+    const { env } = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: PASSTHROUGH_ALL,
+      sockPath: '/tmp/sock',
+    });
     for (const [name, verdict] of Object.entries(classification)) {
       if (verdict.secret) {
         expect(isHandle(env[name]!)).toBe(true);
@@ -178,12 +227,18 @@ describe('ac-2: broker holds real values; harness env handles-only + CHAFF_SOCK'
     }
   });
 
-  it('the harness env exposes no broker auth token: CHAFF_SOCK equals the broker sockPath and no additional secret/token-bearing key is added (only CHAFF_SOCK plus the original var names appear)', () => {
+  it('the harness env exposes no broker auth token: CHAFF_SOCK equals the broker sockPath and no additional secret/token-bearing key is added (only CHAFF_SOCK plus the bucketed var names appear)', () => {
     const snapshot = seededSnapshot();
     const classification = classify(snapshot, {});
-    const { env } = buildHarnessEnv(snapshot, classification, '/tmp/sock');
+    const { env } = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: PASSTHROUGH_ALL,
+      sockPath: '/tmp/sock',
+    });
     expect(env.CHAFF_SOCK).toBe('/tmp/sock');
-    // Keys are exactly the snapshot's names plus CHAFF_SOCK — nothing else.
+    // With every snapshot var bucketed (2 handles + 2 passthrough), keys are
+    // exactly the snapshot's names plus CHAFF_SOCK — nothing else.
     expect(Object.keys(env).sort()).toEqual([...Object.keys(snapshot), 'CHAFF_SOCK'].sort());
     expect(JSON.stringify(env).toLowerCase()).not.toContain('token=');
   });
@@ -192,7 +247,12 @@ describe('ac-2: broker holds real values; harness env handles-only + CHAFF_SOCK'
     process.env.XDG_RUNTIME_DIR = tmp;
     const snapshot = seededSnapshot();
     const classification = classify(snapshot, {});
-    const { env, secrets } = buildHarnessEnv(snapshot, classification, 'placeholder');
+    const { env, secrets } = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: PASSTHROUGH_ALL,
+      sockPath: 'placeholder',
+    });
     broker = await startBroker({ secrets, auditLogPath: logPath });
 
     for (const [name, verdict] of Object.entries(classification)) {
@@ -244,23 +304,36 @@ describe('ac-2: broker holds real values; harness env handles-only + CHAFF_SOCK'
 });
 
 describe('ac-3: launch banner reports handled vars by name, never values, to stderr', () => {
-  it('the launch banner lists, by name, every var classified secret=true that became a handle, and omits every non-secret var', () => {
+  it('the launch banner lists, by name, every var classified secret=true that became a handle, and omits every non-secret (passthrough) var name', () => {
     const snapshot = seededSnapshot();
     const classification = classify(snapshot, {});
-    const banner = formatLaunchBanner(classification);
+    const build = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: PASSTHROUGH_ALL,
+      sockPath: '/tmp/sock',
+    });
+    const banner = formatLaunchBanner(build);
     for (const [name, verdict] of Object.entries(classification)) {
       if (verdict.secret) {
         expect(banner).toContain(name);
       } else {
+        // Passthrough is count-only; individual passthrough names never appear.
         expect(banner).not.toContain(name);
       }
     }
   });
 
-  it('the launch banner contains no secret VALUE (only var names appear, never values)', () => {
+  it('the launch banner contains no secret VALUE (only handle var names appear, never values)', () => {
     const snapshot = seededSnapshot();
     const classification = classify(snapshot, {});
-    const banner = formatLaunchBanner(classification);
+    const build = buildHarnessEnv({
+      snapshot,
+      classification,
+      allowlist: PASSTHROUGH_ALL,
+      sockPath: '/tmp/sock',
+    });
+    const banner = formatLaunchBanner(build);
     for (const value of Object.values(snapshot)) {
       expect(banner).not.toContain(value);
     }
