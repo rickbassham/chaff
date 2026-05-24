@@ -2,6 +2,7 @@
 export * from './audit.js';
 export * from './broker.js';
 export * from './cli.js';
+export * from './config.js';
 export * from './handles.js';
 export * from './launcher.js';
 export * from './policy.js';

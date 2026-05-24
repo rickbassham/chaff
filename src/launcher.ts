@@ -42,6 +42,7 @@ import { join } from 'node:path';
 import { formatHandle } from './handles.js';
 import { classify, type Classification, type EnvSnapshot } from './policy.js';
 import { startBroker, type BrokerSecret } from './broker.js';
+import { loadEffectiveConfig } from './config.js';
 
 /**
  * The default passthrough allowlist: env-var names handed to the harness
@@ -259,6 +260,18 @@ export interface LauncherOptions {
   auditLogPath: string;
   /** Where the launch banner is written. Defaults to `process.stderr`. */
   stderr?: StderrSink;
+  /**
+   * Working directory whose `./.chaff` is the folder-level config (DAR-1140).
+   * Defaults to `process.cwd()`.
+   */
+  cwd?: string;
+  /**
+   * Env used to resolve the user-level config location
+   * (`$XDG_CONFIG_HOME/chaff` → `~/.config/chaff`). Defaults to `process.env`.
+   * Separate from `env` (the snapshot classified into buckets) so a caller can
+   * point config discovery at fixtures without altering the launch env.
+   */
+  configEnv?: EnvSnapshot;
 }
 
 /**
@@ -308,18 +321,34 @@ export function runLauncher(options: LauncherOptions): Promise<number> {
     return Promise.reject(new Error('chaff run: no harness command given after --'));
   }
 
+  // Discover and merge the user + folder config onto the shipped defaults
+  // (defaults→user→folder), enforcing the user never-pass set and collecting any
+  // folder-trust warnings (DAR-1140). With no config files present this yields
+  // the shipped default allowlist and an empty declared-managed set, so the
+  // behaviour matches DAR-1139 exactly.
+  const effective = loadEffectiveConfig({
+    defaults: DEFAULT_PASSTHROUGH_ALLOWLIST,
+    configEnv: options.configEnv ?? snapshotProcessEnv(),
+    cwd: options.cwd ?? process.cwd(),
+    snapshot,
+  });
+
   // Build env + secrets ONCE so the handles seeded into the broker are the very
   // same strings placed in the harness env — a second build would mint fresh
   // nonces and the broker could not resolve the env's handles. CHAFF_SOCK is the
   // only field that depends on the (not-yet-known) sockPath; patch it in after
-  // the broker starts rather than rebuilding. The allowlist is the shipped
-  // default and declaredManaged is empty here — config plumbing is DAR-1140.
+  // the broker starts rather than rebuilding. The effective allowlist and
+  // declared-managed set come from the merged config above.
   const build = buildHarnessEnv({
     snapshot,
     classification,
-    allowlist: DEFAULT_PASSTHROUGH_ALLOWLIST,
+    allowlist: effective.allowlist,
+    declaredManaged: effective.declaredManaged,
     sockPath: '',
   });
+  // Surface folder-trust warnings alongside the build's own advisories so the
+  // launch banner reports both (names only, never values).
+  build.warnings = [...build.warnings, ...effective.warnings];
   const { env, secrets } = build;
 
   return startBroker({ secrets, auditLogPath: options.auditLogPath }).then((broker) => {
