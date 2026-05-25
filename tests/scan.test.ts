@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -390,5 +390,28 @@ describe('ac-4: seeded env + config produces expected names per bucket; no value
     expect(handlesSection).toContain('SCAN_ENTROPY_BLOB');
     expect(stdout).not.toContain(realValue);
     expect(stderr).not.toContain(realValue);
+  });
+});
+
+describe('guard: scan is a pure dry-run — starts no broker, binds no socket', () => {
+  it('`chaff scan` via the built binary, given a controlled XDG_RUNTIME_DIR, leaves it empty: no broker session dir or socket is created (regression guard for the DAR-1098 dry-run property — buildScanReport calls buildHarnessEnv but never startBroker)', () => {
+    requireBin();
+    const runtimeDir = join(tmp, 'runtime');
+    mkdirSync(runtimeDir, { recursive: true });
+
+    // Seed a *_KEY glob-secret so the build path does real work (mints a handle).
+    const { stdout, status } = runChaffScan({
+      XDG_RUNTIME_DIR: runtimeDir,
+      SCAN_GUARD_KEY: 'sk-scan-guard-secret',
+    });
+
+    expect(status).toBe(0);
+    expect(stdout).toContain('SCAN_GUARD_KEY'); // the report was actually produced
+
+    // The broker is the only component that binds a socket; it places its 0700
+    // session dir + 0600 socket under XDG_RUNTIME_DIR. Scan must start no broker,
+    // so the dir stays empty. A regression that made scan start the broker (e.g.
+    // buildScanReport gaining a startBroker call) would leave an entry here.
+    expect(readdirSync(runtimeDir)).toEqual([]);
   });
 });
