@@ -17,7 +17,7 @@ import { execFileSync } from 'node:child_process';
 import { classify } from '../src/policy.js';
 import { buildHarnessEnv, DEFAULT_PASSTHROUGH_ALLOWLIST } from '../src/launcher.js';
 import { type LevelConfig } from '../src/config.js';
-import { buildScanReport, formatScanReport, type ScanReport } from '../src/scan.js';
+import { buildScanReport, formatScanReport, runScan, type ScanReport } from '../src/scan.js';
 import { writeConfig } from './helpers/config-seed.js';
 
 const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
@@ -29,6 +29,7 @@ function reportFor(args: {
   allowlist?: readonly string[];
   declaredManaged?: readonly string[];
   configWarnings?: readonly string[];
+  forceScrub?: readonly string[];
 }): ScanReport {
   return buildScanReport({
     snapshot: args.snapshot,
@@ -36,6 +37,7 @@ function reportFor(args: {
     allowlist: args.allowlist ?? DEFAULT_PASSTHROUGH_ALLOWLIST,
     declaredManaged: args.declaredManaged,
     configWarnings: args.configWarnings,
+    forceScrub: args.forceScrub,
   });
 }
 
@@ -319,6 +321,7 @@ describe('ac-3: scan surfaces advisories', () => {
       handles: [],
       dropped: ['EDITOR'],
       advisories: [],
+      skipped: [],
     };
     const text = formatScanReport(report);
     expect(text).toContain('Advisories:');
@@ -331,6 +334,7 @@ describe('ac-3: scan surfaces advisories', () => {
       handles: ['OPENAI_API_KEY'],
       dropped: [],
       advisories: [],
+      skipped: [],
     };
     const text = formatScanReport(report);
     expect(text).not.toContain('Advisories:');
@@ -388,6 +392,70 @@ describe('ac-4: seeded env + config produces expected names per bucket; no value
     const dIdx = lines.findIndex((l) => l.includes('Dropped from the harness env:'));
     const handlesSection = lines.slice(hIdx, dIdx).join('\n');
     expect(handlesSection).toContain('SCAN_ENTROPY_BLOB');
+    expect(stdout).not.toContain(realValue);
+    expect(stderr).not.toContain(realValue);
+  });
+});
+
+describe('DAR-1099: scan reports redaction-gate skips (push-scrub OFF), never silent', () => {
+  it('buildScanReport yields a NAME-only skip for a handle-secret whose value fails the redaction gate, and none for a strong-valued one', () => {
+    const snapshot = {
+      WEAK_KEY: 'test', // *_KEY → handle; value fails the gate (short/low-entropy)
+      STRONG_KEY: 'a8Fk2Lp9Qz3Wm7Xb4Vn6Yc1Td5Rg0Hj', // *_KEY → handle; clears the gate
+    };
+    const report = reportFor({ snapshot });
+
+    expect(report.handles).toEqual(['STRONG_KEY', 'WEAK_KEY']);
+    expect(report.skipped.map((s) => s.name)).toEqual(['WEAK_KEY']);
+    // NAME only — the value never rides along in the skip record.
+    for (const skip of report.skipped) {
+      expect(JSON.stringify(skip)).not.toContain('test');
+    }
+  });
+
+  it('--force-scrub overrides the gate for the named secret, so it is no longer reported as a skip', () => {
+    const snapshot = { WEAK_KEY: 'test' };
+    const report = reportFor({ snapshot, forceScrub: ['WEAK_KEY'] });
+    expect(report.skipped).toHaveLength(0);
+  });
+
+  it('formatScanReport renders a push-scrub-OFF section naming each skipped secret, value never printed', () => {
+    const report: ScanReport = {
+      passthrough: ['PATH'],
+      handles: ['WEAK_KEY'],
+      dropped: [],
+      advisories: [],
+      skipped: [{ name: 'WEAK_KEY' }],
+    };
+    const text = formatScanReport(report, report.skipped);
+    expect(text.toLowerCase()).toContain('push-scrub off');
+    expect(text).toContain('WEAK_KEY');
+  });
+
+  it('runScan writes a gated-out secret NAME under push-scrub OFF and never its value', () => {
+    const realValue = 'test'; // *_KEY → handle, but fails the redaction gate
+    const chunks: string[] = [];
+    const status = runScan({
+      env: { GATED_KEY: realValue, PATH: '/usr/bin' },
+      configEnv: {},
+      cwd: tmp,
+      stdout: { write: (c) => (chunks.push(c), true) },
+    });
+    const out = chunks.join('');
+    expect(status).toBe(0);
+    expect(out.toLowerCase()).toContain('push-scrub off');
+    expect(out).toContain('GATED_KEY');
+  });
+
+  it('`chaff scan` via the built binary reports a gated-out secret NAME under push-scrub OFF, value absent from stdout/stderr', () => {
+    requireBin();
+    // *_KEY → classified secret (handle), but the value 'short1' fails the gate
+    // (below the 8-char min-length floor), so push-scrub is OFF for it.
+    const realValue = 'short1';
+    const { stdout, stderr, status } = runChaffScan({ BANNER_GATE_KEY: realValue });
+    expect(status).toBe(0);
+    expect(stdout.toLowerCase()).toContain('push-scrub off');
+    expect(stdout).toContain('BANNER_GATE_KEY');
     expect(stdout).not.toContain(realValue);
     expect(stderr).not.toContain(realValue);
   });

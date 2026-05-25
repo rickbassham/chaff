@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { parseInvocation, parseForceScrub, UsageError, USAGE } from '../cli.js';
+import { parseInvocation, parseRunArgs, UsageError, USAGE } from '../cli.js';
 import { runLauncher, defaultAuditLogPath } from '../launcher.js';
 import { runScan } from '../scan.js';
 import { runExec } from '../exec.js';
@@ -22,13 +22,13 @@ function main(argv: string[]): number | Promise<number> {
   }
 
   if (invocation.command === 'run') {
-    // `chaff run [--force-scrub NAME]... -- <harness cmd>`: pull the repeatable
-    // --force-scrub options (DAR-1099) out first, then drop the leading `--`
-    // separator before the harness command if present.
+    // `chaff run [--force-scrub NAME]... -- <harness cmd>`: `--` terminates chaff
+    // option parsing, so a `--force-scrub` token inside the harness command
+    // (after `--`) is preserved verbatim rather than consumed (DAR-1099).
     let forceScrub: string[];
-    let rest: string[];
+    let harnessArgs: string[];
     try {
-      ({ forceScrub, rest } = parseForceScrub(invocation.args));
+      ({ forceScrub, harnessArgs } = parseRunArgs(invocation.args));
     } catch (err) {
       if (err instanceof UsageError) {
         process.stderr.write(`chaff run: ${err.message}\n\n${USAGE}`);
@@ -36,12 +36,11 @@ function main(argv: string[]): number | Promise<number> {
       }
       throw err;
     }
-    const args = rest[0] === '--' ? rest.slice(1) : rest;
-    if (args.length === 0) {
+    if (harnessArgs.length === 0) {
       process.stderr.write('chaff run: no harness command given after --\n\n' + USAGE);
       return 2;
     }
-    return runLauncher({ argv: args, auditLogPath: defaultAuditLogPath(), forceScrub });
+    return runLauncher({ argv: harnessArgs, auditLogPath: defaultAuditLogPath(), forceScrub });
   }
 
   if (invocation.command === 'scan') {

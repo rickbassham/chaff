@@ -60,6 +60,39 @@ export function parseForceScrub(args: string[]): ForceScrubParse {
   return { forceScrub, rest };
 }
 
+/** The result of parsing a `chaff run` arg list (DAR-1099). */
+export interface RunArgsParse {
+  /** Every `--force-scrub NAME` collected from the chaff-option segment, in order. */
+  forceScrub: string[];
+  /**
+   * The harness command (and its args) verbatim — everything after the first
+   * `--`, or the leftover option-segment args when no `--` is present. Never
+   * scanned for chaff options, so a harness flag named `--force-scrub` is
+   * preserved.
+   */
+  harnessArgs: string[];
+}
+
+/**
+ * Parse a `chaff run` arg list into its `--force-scrub` overrides and the
+ * harness command. `--` terminates chaff option parsing: everything after the
+ * first `--` is the harness command verbatim and is NOT scanned for chaff
+ * options (so `chaff run --force-scrub A -- tool --force-scrub B` collects only
+ * `['A']` and the harness argv stays `['tool', '--force-scrub', 'B']`). When no
+ * `--` is present, the whole list is the chaff-option segment and the leftover
+ * after extracting `--force-scrub` pairs is the harness command. A trailing
+ * `--force-scrub` with no NAME throws {@link UsageError}.
+ */
+export function parseRunArgs(args: string[]): RunArgsParse {
+  const sepIndex = args.indexOf('--');
+  if (sepIndex === -1) {
+    const { forceScrub, rest } = parseForceScrub(args);
+    return { forceScrub, harnessArgs: rest };
+  }
+  const { forceScrub } = parseForceScrub(args.slice(0, sepIndex));
+  return { forceScrub, harnessArgs: args.slice(sepIndex + 1) };
+}
+
 /** Split argv into a command and its remaining args, or throw UsageError. */
 export function parseInvocation(argv: string[]): Invocation {
   const [command, ...args] = argv;
