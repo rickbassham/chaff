@@ -107,8 +107,7 @@ export async function resolveChildEnv(
 ): Promise<Record<string, string>> {
   const entries = await Promise.all(
     Object.entries(snapshot).map(
-      async ([name, value]) =>
-        [name, isHandle(value) ? await resolve(value) : value] as const,
+      async ([name, value]) => [name, isHandle(value) ? await resolve(value) : value] as const,
     ),
   );
   return Object.fromEntries(entries);
