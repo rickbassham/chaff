@@ -2,6 +2,7 @@
 import { parseInvocation, UsageError, USAGE } from '../cli.js';
 import { runLauncher, defaultAuditLogPath } from '../launcher.js';
 import { runScan } from '../scan.js';
+import { runExec } from '../exec.js';
 
 /**
  * Dispatch one invocation. Returns a number for synchronous commands or a
@@ -34,6 +35,13 @@ function main(argv: string[]): number | Promise<number> {
     // `chaff scan`: classification dry-run. Reads process.env, prints the
     // report to stdout, starts no broker, and spawns nothing.
     return runScan();
+  }
+
+  if (invocation.command === 'exec') {
+    // `chaff exec --b64 <blob>`: base64-decode the wrapped command, resolve
+    // handle-valued env vars into the child env via CHAFF_SOCK, and run the
+    // decoded command under the inner shell (PLAN.md decision #2).
+    return runExec({ args: invocation.args });
   }
 
   // Phase 0 scaffold: the remaining commands are wired but not implemented. Each
