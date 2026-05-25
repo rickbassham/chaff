@@ -105,11 +105,13 @@ export async function resolveChildEnv(
   snapshot: EnvSnapshot,
   resolve: HandleResolver,
 ): Promise<Record<string, string>> {
-  const childEnv: Record<string, string> = {};
-  for (const [name, value] of Object.entries(snapshot)) {
-    childEnv[name] = isHandle(value) ? await resolve(value) : value;
-  }
-  return childEnv;
+  const entries = await Promise.all(
+    Object.entries(snapshot).map(
+      async ([name, value]) =>
+        [name, isHandle(value) ? await resolve(value) : value] as const,
+    ),
+  );
+  return Object.fromEntries(entries);
 }
 
 /** Inputs to {@link runExec}. */
