@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { parseInvocation, UsageError, USAGE } from '../cli.js';
+import { parseInvocation, parseForceScrub, UsageError, USAGE } from '../cli.js';
 import { runLauncher, defaultAuditLogPath } from '../launcher.js';
 import { runScan } from '../scan.js';
 import { runExec } from '../exec.js';
@@ -22,13 +22,26 @@ function main(argv: string[]): number | Promise<number> {
   }
 
   if (invocation.command === 'run') {
-    // `chaff run -- <harness cmd>`: drop the leading `--` separator if present.
-    const args = invocation.args[0] === '--' ? invocation.args.slice(1) : invocation.args;
+    // `chaff run [--force-scrub NAME]... -- <harness cmd>`: pull the repeatable
+    // --force-scrub options (DAR-1099) out first, then drop the leading `--`
+    // separator before the harness command if present.
+    let forceScrub: string[];
+    let rest: string[];
+    try {
+      ({ forceScrub, rest } = parseForceScrub(invocation.args));
+    } catch (err) {
+      if (err instanceof UsageError) {
+        process.stderr.write(`chaff run: ${err.message}\n\n${USAGE}`);
+        return 2;
+      }
+      throw err;
+    }
+    const args = rest[0] === '--' ? rest.slice(1) : rest;
     if (args.length === 0) {
       process.stderr.write('chaff run: no harness command given after --\n\n' + USAGE);
       return 2;
     }
-    return runLauncher({ argv: args, auditLogPath: defaultAuditLogPath() });
+    return runLauncher({ argv: args, auditLogPath: defaultAuditLogPath(), forceScrub });
   }
 
   if (invocation.command === 'scan') {

@@ -37,6 +37,7 @@ import {
   type HarnessEnvBuild,
 } from './launcher.js';
 import { loadEffectiveConfig } from './config.js';
+import type { RedactionSkip } from './redaction.js';
 
 /**
  * A var-name partition of an env snapshot under the default-deny model: the
@@ -123,11 +124,19 @@ export function buildScanReport(options: BuildScanReportOptions): ScanReport {
  * and computes nothing per-var). When there are no advisories and the dropped
  * bucket is empty, no advisory section is emitted.
  *
- * Structured as discrete lines so the redaction-gate skip line (DAR-1099,
- * Phase 3) and the working-tree scan section (DAR-1106, Phase 4) can be
- * appended later without reworking this format.
+ * The working-tree scan section (DAR-1106, Phase 4) can be appended later
+ * without reworking this format.
+ *
+ * `skipped` (DAR-1099, decision #3) names secrets the redaction-eligibility gate
+ * excluded from push-scrubbing. When non-empty, a push-scrub-OFF section names
+ * each one (by NAME only — never a value) so the gate's decision is reported
+ * loudly, never silent; the handle/pull-channel still applies to them. When
+ * empty (or omitted) no such section is rendered.
  */
-export function formatScanReport(report: ScanReport): string {
+export function formatScanReport(
+  report: ScanReport,
+  skipped: readonly RedactionSkip[] = [],
+): string {
   const lines = ['chaff scan: default-deny dry-run (no harness or broker is started)', ''];
 
   appendSection(lines, 'Passes through unchanged:', report.passthrough);
@@ -135,6 +144,14 @@ export function formatScanReport(report: ScanReport): string {
   appendSection(lines, 'Would be replaced by handles:', report.handles);
   lines.push('');
   appendSection(lines, 'Dropped from the harness env:', report.dropped);
+
+  if (skipped.length > 0) {
+    lines.push('');
+    lines.push('push-scrub OFF (handle still applies; output not scrubbed for):');
+    for (const skip of skipped) {
+      lines.push(`  ${skip.name}`);
+    }
+  }
 
   const hasDroppedHint = report.dropped.length > 0;
   if (report.advisories.length > 0 || hasDroppedHint) {
