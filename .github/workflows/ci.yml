@@ -25,8 +25,4 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: make typecheck
-      - run: make lint
-      - run: make test
-      - run: make format-check
-      - run: make build
+      - run: make verify

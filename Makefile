@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help install build test typecheck lint format format-check audit
+.PHONY: help verify install build test typecheck lint format format-check audit
 
 help: ## Show this help message
 	@echo "Available targets:"
@@ -8,6 +8,8 @@ help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Run 'make <target>' to execute a target."
+
+verify: format-check lint typecheck test build ## Run the full pre-commit/CI gate (the dev-workflow skills and CI both run this)
 
 install: ## Install dependencies with frozen lockfile
 	pnpm install --frozen-lockfile
