@@ -37,9 +37,21 @@ export interface ForceScrubParse {
 }
 
 /**
+ * The shape a `--force-scrub NAME` must match: a POSIX env-var name
+ * (`[A-Za-z_][A-Za-z0-9_]*`). Validated at parse time so a NAME can never
+ * contain the comma the `CHAFF_FORCE_SCRUB` channel joins on — that keeps the
+ * launcher join (`src/launcher.ts`) + exec split (`parseForceScrubEnv`,
+ * `src/exec.ts`) round-trip unambiguous, so a NAME like `FOO,BAR` is rejected
+ * here rather than silently splitting into two entries downstream (DAR-1151).
+ */
+const ENV_VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
  * Extract every repeatable `--force-scrub NAME` option from `args`, returning
  * the collected names plus the remaining args. A trailing `--force-scrub` with
- * no following NAME throws {@link UsageError}. Only `--force-scrub` is consumed;
+ * no following NAME throws {@link UsageError}, as does a NAME that is not a valid
+ * env-var name ({@link ENV_VAR_NAME}) — the latter keeps the `CHAFF_FORCE_SCRUB`
+ * cross-process channel unambiguous (DAR-1151). Only `--force-scrub` is consumed;
  * all other args (including a `--` separator) are passed through in `rest`.
  */
 export function parseForceScrub(args: string[]): ForceScrubParse {
@@ -50,6 +62,11 @@ export function parseForceScrub(args: string[]): ForceScrubParse {
       const name = args[i + 1];
       if (name === undefined) {
         throw new UsageError('--force-scrub requires a NAME');
+      }
+      if (!ENV_VAR_NAME.test(name)) {
+        throw new UsageError(
+          `--force-scrub NAME must be a valid env-var name (${ENV_VAR_NAME.source}), got: ${name}`,
+        );
       }
       forceScrub.push(name);
       i++;

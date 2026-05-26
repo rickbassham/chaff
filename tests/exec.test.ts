@@ -1,5 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, chmodSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  chmodSync,
+  existsSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -425,5 +433,39 @@ describe('ac-4: child gets real values; parent/harness keeps only handles', () =
     // ...while the value the harness assigned to SECRET (handed to exec) was the handle.
     expect(isHandle(handle)).toBe(true);
     expect(handle).not.toBe(real);
+  });
+});
+
+describe('DAR-1151 ac-3: a force-scrub NAME containing the channel separator never becomes two entries across the real binary', () => {
+  it('e2e via the built chaff binary: `chaff run --force-scrub FOO,BAR -- <child>` exits non-zero with a UsageError before launching the child (never seeds CHAFF_FORCE_SCRUB=FOO,BAR as two NAMEs)', async () => {
+    const marker = join(tmp, 'child-ran.txt');
+    const child = join(tmp, 'dar1151-child.mjs');
+    // A child that records the channel value it saw and that it ran at all. If
+    // `chaff run` rejected the NAME at parse time the child never runs, so the
+    // marker stays absent; if (wrongly) launched, the marker reveals what the
+    // channel resolved to.
+    writeFileSync(
+      child,
+      `import { writeFileSync } from 'node:fs';
+       writeFileSync(${JSON.stringify(marker)}, process.env.CHAFF_FORCE_SCRUB ?? '<unset>');
+      `,
+    );
+    await expect(
+      pexecFile(
+        process.execPath,
+        [BIN, 'run', '--force-scrub', 'FOO,BAR', '--', process.execPath, child],
+        { encoding: 'utf8', env: { ...process.env } },
+      ),
+      // Pin the rejection to a clean UsageError (exit code 2) carrying the
+      // force-scrub usage message, not just "failed somehow": this distinguishes
+      // a deliberate parse-time rejection from an incidental internal crash that
+      // would also leave the marker absent (review finding f-1).
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining('--force-scrub NAME must be a valid env-var name'),
+    });
+    // The child never launched: a separator-containing NAME is rejected before
+    // the harness starts, so the marker file was never written.
+    expect(existsSync(marker)).toBe(false);
   });
 });
