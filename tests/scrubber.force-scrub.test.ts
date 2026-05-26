@@ -96,9 +96,8 @@ afterEach(() => {
 
 describe('ac-1: force-scrubbed gate-failing value is redacted on exec egress', () => {
   it('exec egress: a force-scrubbed short/low-entropy secret value printed by the child to stdout is replaced with [redacted:NAME] and the raw value appears nowhere in the scrubbed stdout', async () => {
-    // `prod` fails the value-level gate (short + low entropy) but is long enough
-    // here? No — pad to a value that clears the per-variant floor but fails the
-    // value gate via low entropy, so the floor does not exclude it.
+    // A value that clears the per-variant length floor but fails the value gate
+    // via low entropy, so the floor does not exclude it.
     const value = 'prodprodprod'; // 12 chars: clears length floor, low entropy -> gate-failing.
     const handle = formatHandle('DEPLOY_ENV');
     broker = await startBroker({
