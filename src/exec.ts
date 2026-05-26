@@ -35,8 +35,12 @@
  * scrubber's pattern set is built from the very values exec just resolved (every
  * handle-valued env var = a secret whose NAME, real value and handle exec already
  * holds), gated by the redaction-eligibility gate (DAR-1099) via
- * {@link redactionEntriesFromSecrets}. A handle re-appearing in the output is a
- * bypassed-secret canary: warned to chaff's own stderr and audit-logged by NAME.
+ * {@link redactionEntriesFromSecrets}. The `chaff run --force-scrub NAME` override
+ * reaches this separate process through the `CHAFF_FORCE_SCRUB` env var the
+ * launcher seeds into the harness env (DAR-1150): a NAME listed there is
+ * push-scrubbed even when its value fails the gate. A handle re-appearing in the
+ * output is a bypassed-secret canary: warned to chaff's own stderr and
+ * audit-logged by NAME.
  */
 
 import { spawn, type StdioOptions } from 'node:child_process';
@@ -169,6 +173,33 @@ export interface ExecOptions {
    * fires).
    */
   auditLogPath?: string;
+  /**
+   * Secret NAMES whose redaction-eligibility gate is overridden so they ARE
+   * push-scrubbed on the egress path despite failing it — the
+   * `chaff run --force-scrub NAME` override (DAR-1099, decision #3), threaded to
+   * this separate `chaff exec` process via the `CHAFF_FORCE_SCRUB` env var the
+   * launcher seeds into the harness env (DAR-1150). Defaults to the parsed
+   * {@link CHAFF_FORCE_SCRUB_ENV} value, or empty when unset. The per-variant
+   * min-length floor still applies even to a forced secret.
+   */
+  forceScrub?: readonly string[];
+}
+
+/**
+ * The harness env var carrying the `--force-scrub` NAME set from `chaff run`'s
+ * launcher process into each `chaff exec` child (the egress scrubber). Comma
+ * (`,`) separated; NAMEs are env-var names so they never contain a comma.
+ * Seeded by the launcher (buildHarnessEnv) and read here as the
+ * {@link ExecOptions.forceScrub} default.
+ */
+export const CHAFF_FORCE_SCRUB_ENV = 'CHAFF_FORCE_SCRUB';
+
+/** Parse a `CHAFF_FORCE_SCRUB` value (comma-separated NAMEs) into a name list. */
+export function parseForceScrubEnv(value: string | undefined): string[] {
+  if (value === undefined || value.length === 0) {
+    return [];
+  }
+  return value.split(',').filter((name) => name.length > 0);
 }
 
 /** A minimal byte/string sink — `process.stdout` and `process.stderr` satisfy it. */
@@ -210,12 +241,14 @@ interface ResolvedRedaction {
  * child env. Every handle-valued env var is a secret exec already holds the NAME
  * (the key), real value (`childEnv[name]`) and handle (the inbound value) for —
  * so no extra broker round-trip is needed. Patterns are gated by the
- * redaction-eligibility gate (DAR-1099) via {@link redactionEntriesFromSecrets};
- * the handle list drives the canary on a bypassed-secret leak.
+ * redaction-eligibility gate (DAR-1099) via {@link redactionEntriesFromSecrets},
+ * with `forceScrub` overriding the gate per named secret (DAR-1150); the handle
+ * list drives the canary on a bypassed-secret leak.
  */
 function buildRedaction(
   snapshot: EnvSnapshot,
   childEnv: Record<string, string>,
+  forceScrub: readonly string[],
 ): ResolvedRedaction {
   const handles: HandleEntry[] = [];
   const secrets: { name: string; value: string }[] = [];
@@ -229,7 +262,7 @@ function buildRedaction(
       secrets.push({ name, value: resolved });
     }
   }
-  return { entries: redactionEntriesFromSecrets(secrets), handles };
+  return { entries: redactionEntriesFromSecrets(secrets, forceScrub), handles };
 }
 
 /**
@@ -269,6 +302,7 @@ export function runExec(options: ExecOptions): Promise<number> {
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
   const auditLogPath = options.auditLogPath ?? process.env.CHAFF_AUDIT_LOG;
+  const forceScrub = options.forceScrub ?? parseForceScrubEnv(process.env[CHAFF_FORCE_SCRUB_ENV]);
 
   return resolveChildEnv(snapshot, (handle) => resolveViaBroker(sockPath, handle)).then(
     (childEnv) =>
@@ -295,7 +329,7 @@ export function runExec(options: ExecOptions): Promise<number> {
         };
 
         if (scrubbing) {
-          const { entries, handles } = buildRedaction(snapshot, childEnv);
+          const { entries, handles } = buildRedaction(snapshot, childEnv, forceScrub);
           const onAudit =
             auditLogPath !== undefined
               ? (record: { op: string; secretName: string }) =>

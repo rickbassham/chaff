@@ -31,7 +31,8 @@
  * ({@link encodedVariants}); this module matches whatever patterns it is handed.
  * {@link redactionEntriesFromSecrets} is a thin name-preserving adapter over the
  * same gate so callers (exec wiring) get NAME-tagged entries the scrubber needs
- * to emit `[redacted:NAME]`.
+ * to emit `[redacted:NAME]`; it also honors the `--force-scrub` override
+ * (DAR-1150) so a forced gate-failing value is still redacted on the exec path.
  *
  * Matching is `indexOf`-per-pattern (fine for the dozens of secrets a session
  * holds; Aho-Corasick is noted in PLAN.md as a future optimization, out of scope
@@ -269,27 +270,35 @@ export interface ScrubberSecret {
 
 /**
  * Build NAME-tagged {@link RedactionEntry} list from secrets, honoring the
- * redaction-eligibility gate (DAR-1099): a secret whose value fails
- * {@link isRedactionEligible} contributes no entry (so a short/common value like
- * `prod`/`test` cannot corrupt innocent output), while an eligible secret
- * contributes an entry carrying its {@link encodedVariants}.
+ * redaction-eligibility gate (DAR-1099) and the `--force-scrub` override
+ * (DAR-1150): a secret whose value fails {@link isRedactionEligible} contributes
+ * no entry (so a short/common value like `prod`/`test` cannot corrupt innocent
+ * output) **unless** its NAME is in `forceScrub`, while an eligible (or forced)
+ * secret contributes an entry carrying its {@link encodedVariants}.
  *
  * This is the name-preserving adapter the scrubber needs: {@link buildRedactionSet}
  * dedupes patterns into a flat array without their NAMEs, but the scrubber must
  * emit `[redacted:NAME]`, so this keeps the per-secret NAME alongside its
  * variants. It consumes the gate; it does not change it. Variants run through the
  * same per-variant length floor as {@link buildRedactionSet} via the shared
- * {@link gatedVariants} helper, so the two gate-consumption paths cannot drift.
+ * {@link gatedVariants} helper, so the two gate-consumption paths cannot drift —
+ * the per-variant floor still applies even to a forced secret, so a forced short
+ * value's sub-floor variants are still dropped (the override accepts corruption
+ * from a value's eligible-length forms, never from a collision-prone short one).
  *
- * Note: unlike {@link buildRedactionSet} this adapter does **not** honor
- * `--force-scrub` (that flag is DAR-1099, not wired into the exec egress path);
- * tracked separately. A value that fails {@link isRedactionEligible} contributes
- * no entry here regardless of force-scrub.
+ * `forceScrub` is the set of NAMEs whose value-level gate verdict is overridden
+ * so they ARE scrubbed despite failing it (the `chaff run --force-scrub NAME`
+ * flag, threaded to `chaff exec` via `CHAFF_FORCE_SCRUB`). Defaults to empty, in
+ * which case the gate alone decides — matching the prior behavior.
  */
-export function redactionEntriesFromSecrets(secrets: ScrubberSecret[]): RedactionEntry[] {
+export function redactionEntriesFromSecrets(
+  secrets: ScrubberSecret[],
+  forceScrub: readonly string[] = [],
+): RedactionEntry[] {
+  const forced = new Set(forceScrub);
   const entries: RedactionEntry[] = [];
   for (const secret of secrets) {
-    if (!isRedactionEligible(secret.value, {})) {
+    if (!forced.has(secret.name) && !isRedactionEligible(secret.value, {})) {
       continue;
     }
     entries.push({ name: secret.name, patterns: gatedVariants(secret.value, {}) });
