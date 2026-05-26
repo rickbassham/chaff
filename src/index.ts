@@ -6,6 +6,7 @@ export * from './config.js';
 export * from './encodings.js';
 export * from './exec.js';
 export * from './handles.js';
+export * from './hook.js';
 export * from './launcher.js';
 export * from './policy.js';
 export * from './redaction.js';
