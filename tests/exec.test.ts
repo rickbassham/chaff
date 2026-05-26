@@ -456,7 +456,14 @@ describe('DAR-1151 ac-3: a force-scrub NAME containing the channel separator nev
         [BIN, 'run', '--force-scrub', 'FOO,BAR', '--', process.execPath, child],
         { encoding: 'utf8', env: { ...process.env } },
       ),
-    ).rejects.toMatchObject({ code: expect.any(Number) });
+      // Pin the rejection to a clean UsageError (exit code 2) carrying the
+      // force-scrub usage message, not just "failed somehow": this distinguishes
+      // a deliberate parse-time rejection from an incidental internal crash that
+      // would also leave the marker absent (review finding f-1).
+    ).rejects.toMatchObject({
+      code: 2,
+      stderr: expect.stringContaining('--force-scrub NAME must be a valid env-var name'),
+    });
     // The child never launched: a separator-containing NAME is rejected before
     // the harness starts, so the marker file was never written.
     expect(existsSync(marker)).toBe(false);
