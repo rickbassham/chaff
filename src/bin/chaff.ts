@@ -3,6 +3,7 @@ import { parseInvocation, parseRunArgs, UsageError, USAGE } from '../cli.js';
 import { runLauncher, defaultAuditLogPath } from '../launcher.js';
 import { runScan } from '../scan.js';
 import { runExec } from '../exec.js';
+import { runInstallHooks, defaultSettingsPath } from '../install-hooks.js';
 
 /**
  * Dispatch one invocation. Returns a number for synchronous commands or a
@@ -54,6 +55,12 @@ function main(argv: string[]): number | Promise<number> {
     // handle-valued env vars into the child env via CHAFF_SOCK, and run the
     // decoded command under the inner shell (PLAN.md decision #2).
     return runExec({ args: invocation.args });
+  }
+
+  if (invocation.command === 'install-hooks') {
+    // `chaff install-hooks`: idempotently merge chaff's PreToolUse hook into the
+    // user's Claude Code settings.json, preserving existing hooks/keys (DAR-1107).
+    return runInstallHooks({ settingsPath: defaultSettingsPath() });
   }
 
   // Phase 0 scaffold: the remaining commands are wired but not implemented. Each
