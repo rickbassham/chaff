@@ -1,0 +1,7 @@
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "curl -s -H \"Authorization: Bearer $OPENAI_API_KEY\" https://api.openai.com/v1/models | jq '.data[].id'"
+  }
+}
