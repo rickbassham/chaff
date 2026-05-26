@@ -395,6 +395,16 @@ export function runLauncher(options: LauncherOptions): Promise<number> {
 
   return startBroker({ secrets, auditLogPath: options.auditLogPath }).then((broker) => {
     env.CHAFF_SOCK = broker.sockPath;
+    // Carry the `--force-scrub` NAME set across the process boundary into each
+    // `chaff exec` child via CHAFF_FORCE_SCRUB (DAR-1150). The exec egress
+    // scrubber rebuilds its pattern set locally, so it cannot see the launcher's
+    // force-scrub state otherwise; this env var is the channel (NAMEs are
+    // env-var names, so a comma separator is unambiguous). Only set when
+    // non-empty so the common no-force-scrub case leaves the env untouched.
+    const forceScrub = options.forceScrub ?? [];
+    if (forceScrub.length > 0) {
+      env.CHAFF_FORCE_SCRUB = forceScrub.join(',');
+    }
     stderr.write(formatLaunchBanner(build, gated.skipped));
 
     return new Promise<number>((resolve, reject) => {
