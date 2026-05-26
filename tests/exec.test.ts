@@ -158,7 +158,10 @@ describe('ac-1: decode the blob, connect via CHAFF_SOCK, resolve handles into th
     expect(readFileSync(outFile, 'utf8').trim()).toBe('a_b_c');
   });
 
-  it('e2e via the built chaff binary: `chaff exec --b64 <printenv SECRET>` with a handle in SECRET prints the real value', async () => {
+  it('e2e via the built chaff binary: `chaff exec --b64 <printenv SECRET>` resolves the handle into the child env, and the egress scrubber (DAR-1102) redacts the printed value to [redacted:SECRET]', async () => {
+    // The child still RECEIVES the resolved real value (resolution proven by the
+    // file-capturing tests below); but on the default exec path stdout is piped
+    // through the scrubber, so the value never reaches the captured output.
     const real = 'sk-e2e-printenv-secret';
     const handle = await brokerWithSecret('SECRET', real);
     const { stdout } = await pexecFile(
@@ -166,7 +169,8 @@ describe('ac-1: decode the blob, connect via CHAFF_SOCK, resolve handles into th
       [BIN, 'exec', '--b64', b64('printenv SECRET')],
       { encoding: 'utf8', env: { ...process.env, SECRET: handle, CHAFF_SOCK: broker!.sockPath } },
     );
-    expect(stdout.trim()).toBe(real);
+    expect(stdout.trim()).toBe('[redacted:SECRET]');
+    expect(stdout).not.toContain(real);
   });
 });
 
