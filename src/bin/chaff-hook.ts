@@ -11,9 +11,10 @@
  * or mangle a command — the harness sees the non-zero exit and runs the original
  * tool call unchanged rather than a fabricated one.
  *
- * The base64-wrap logic lives in {@link import('../hook.js')} (DAR-1104); the
- * secret-file deny (DAR-1105) and `--strict-reads` (DAR-1106) decision functions
- * land in their siblings and are wired into {@link dispatchHook} when present.
+ * The base64-wrap logic lives in {@link import('../hook.js')} (DAR-1104) and the
+ * secret-file deny in {@link import('../secret-file.js')} (DAR-1105); both are
+ * wired into {@link dispatchHook} by default. The `--strict-reads` deny
+ * (DAR-1106) lands in its sibling and is gated by the `--strict-reads` flag.
  */
 
 import { dispatchHook } from '../hook-dispatch.js';

@@ -13,3 +13,4 @@ export * from './launcher.js';
 export * from './policy.js';
 export * from './redaction.js';
 export * from './scan.js';
+export * from './secret-file.js';
