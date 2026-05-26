@@ -8,4 +8,5 @@ export * from './exec.js';
 export * from './handles.js';
 export * from './launcher.js';
 export * from './policy.js';
+export * from './redaction.js';
 export * from './scan.js';

@@ -25,9 +25,12 @@
  * logic are unit-testable without touching `process.env` or stdout — mirroring
  * the launcher's split (DAR-1100).
  *
- * Redaction-gate skip reporting (DAR-1099, Phase 3) and the working-tree secret
- * scan plus `--strict-reads` (DAR-1106, Phase 4) extend this command later and
- * are deliberately out of scope here.
+ * Redaction-gate skip reporting (DAR-1099, decision #3) is wired here: scan runs
+ * the same {@link buildRedactionSet} gate the launcher applies over the secrets
+ * it would hand off, and reports the NAME-only skips so `chaff scan` is never
+ * silent about a gated-out secret. The working-tree secret scan plus
+ * `--strict-reads` (DAR-1106, Phase 4) extend this command later and are out of
+ * scope here.
  */
 
 import { classify, type Classification, type EnvSnapshot } from './policy.js';
@@ -37,6 +40,7 @@ import {
   type HarnessEnvBuild,
 } from './launcher.js';
 import { loadEffectiveConfig } from './config.js';
+import { buildRedactionSet, type RedactionSkip } from './redaction.js';
 
 /**
  * A var-name partition of an env snapshot under the default-deny model: the
@@ -58,6 +62,14 @@ export interface ScanReport {
    * {@link formatScanReport} renders when the dropped bucket is non-empty.
    */
   advisories: string[];
+  /**
+   * Handle-secrets the redaction-eligibility gate excluded from push-scrubbing
+   * (DAR-1099, decision #3): NAME only, never a value. The pull-channel/handle
+   * still applies; only push-scrubbing is disabled. {@link formatScanReport}
+   * renders a push-scrub-OFF section when this is non-empty so the gate's
+   * decision is reported via `chaff scan` — never silent.
+   */
+  skipped: RedactionSkip[];
 }
 
 /** Inputs to {@link buildScanReport}. */
@@ -75,6 +87,13 @@ export interface BuildScanReportOptions {
    * folder-trust warnings from {@link loadEffectiveConfig}). Defaults to empty.
    */
   configWarnings?: readonly string[];
+  /**
+   * Names whose redaction-gate verdict is overridden so they ARE push-scrubbed
+   * despite failing the gate (the `--force-scrub NAME` override). Threaded into
+   * {@link buildRedactionSet} so a forced secret is not reported as a skip.
+   * Defaults to empty.
+   */
+  forceScrub?: readonly string[];
 }
 
 /**
@@ -103,11 +122,22 @@ export function buildScanReport(options: BuildScanReportOptions): ScanReport {
     sockPath: '',
   });
 
+  // Run the same redaction-eligibility gate the launcher applies (DAR-1099,
+  // decision #3) over the very secrets buildHarnessEnv produced, so scan's
+  // push-scrub-OFF report matches what `chaff run` would push-scrub. Only the
+  // NAME-only skip records are kept; the gated patterns (and the value-bearing
+  // secrets) are discarded — scan never push-scrubs, it only reports.
+  const gated = buildRedactionSet({
+    secrets: build.secrets,
+    forceScrub: options.forceScrub,
+  });
+
   return {
     passthrough: build.passthrough,
     handles: build.handles,
     dropped: build.dropped,
     advisories: [...build.warnings, ...(options.configWarnings ?? [])],
+    skipped: gated.skipped,
   };
 }
 
@@ -123,11 +153,19 @@ export function buildScanReport(options: BuildScanReportOptions): ScanReport {
  * and computes nothing per-var). When there are no advisories and the dropped
  * bucket is empty, no advisory section is emitted.
  *
- * Structured as discrete lines so the redaction-gate skip line (DAR-1099,
- * Phase 3) and the working-tree scan section (DAR-1106, Phase 4) can be
- * appended later without reworking this format.
+ * The working-tree scan section (DAR-1106, Phase 4) can be appended later
+ * without reworking this format.
+ *
+ * `skipped` (DAR-1099, decision #3) names secrets the redaction-eligibility gate
+ * excluded from push-scrubbing. When non-empty, a push-scrub-OFF section names
+ * each one (by NAME only — never a value) so the gate's decision is reported
+ * loudly, never silent; the handle/pull-channel still applies to them. When
+ * empty (or omitted) no such section is rendered.
  */
-export function formatScanReport(report: ScanReport): string {
+export function formatScanReport(
+  report: ScanReport,
+  skipped: readonly RedactionSkip[] = [],
+): string {
   const lines = ['chaff scan: default-deny dry-run (no harness or broker is started)', ''];
 
   appendSection(lines, 'Passes through unchanged:', report.passthrough);
@@ -135,6 +173,14 @@ export function formatScanReport(report: ScanReport): string {
   appendSection(lines, 'Would be replaced by handles:', report.handles);
   lines.push('');
   appendSection(lines, 'Dropped from the harness env:', report.dropped);
+
+  if (skipped.length > 0) {
+    lines.push('');
+    lines.push('push-scrub OFF (handle still applies; output not scrubbed for):');
+    for (const skip of skipped) {
+      lines.push(`  ${skip.name}`);
+    }
+  }
 
   const hasDroppedHint = report.dropped.length > 0;
   if (report.advisories.length > 0 || hasDroppedHint) {
@@ -188,6 +234,12 @@ export interface ScanOptions {
    * point config discovery at fixtures without altering the reported env.
    */
   configEnv?: EnvSnapshot;
+  /**
+   * Names to force past the redaction-eligibility gate (the repeatable
+   * `--force-scrub NAME` option, DAR-1099). A forced secret is push-scrubbed
+   * despite failing the gate, so it is not reported as a skip. Defaults to empty.
+   */
+  forceScrub?: readonly string[];
 }
 
 /** Snapshot `process.env` into a plain string map (dropping undefined values). */
@@ -226,7 +278,8 @@ export function runScan(options: ScanOptions = {}): number {
     allowlist: effective.allowlist,
     declaredManaged: effective.declaredManaged,
     configWarnings: effective.warnings,
+    forceScrub: options.forceScrub,
   });
-  stdout.write(formatScanReport(report));
+  stdout.write(formatScanReport(report, report.skipped));
   return 0;
 }

@@ -43,6 +43,7 @@ import { formatHandle } from './handles.js';
 import { classify, type Classification, type EnvSnapshot } from './policy.js';
 import { startBroker, type BrokerSecret } from './broker.js';
 import { loadEffectiveConfig } from './config.js';
+import { buildRedactionSet, type RedactionSkip } from './redaction.js';
 
 /**
  * The default passthrough allowlist: env-var names handed to the harness
@@ -216,11 +217,18 @@ export function buildHarnessEnv(options: BuildHarnessEnvOptions): HarnessEnvBuil
  *
  * Passthrough is count-only by design — only handles are listed by name, so a
  * long benign env does not bury the security-relevant lines, and no passthrough
- * name (which a value could be confused with) is printed. Structured as discrete
- * lines so the redaction-gate skip line (DAR-1099, Phase 3) can be appended
- * later without reworking this format.
+ * name (which a value could be confused with) is printed.
+ *
+ * `skipped` (DAR-1099, decision #3) names secrets the redaction-eligibility gate
+ * excluded from push-scrubbing. When non-empty, a push-scrub-OFF section names
+ * each one (by NAME only — never a value) so the gate's decision is reported
+ * loudly, never silent; the handle/pull-channel still applies to them. When
+ * empty (or omitted) no such line is rendered.
  */
-export function formatLaunchBanner(build: HarnessEnvBuild): string {
+export function formatLaunchBanner(
+  build: HarnessEnvBuild,
+  skipped: readonly RedactionSkip[] = [],
+): string {
   const lines = ['chaff: building default-deny harness env'];
   lines.push(`  passthrough: ${build.passthrough.length} var(s) passed through verbatim`);
 
@@ -234,6 +242,13 @@ export function formatLaunchBanner(build: HarnessEnvBuild): string {
   }
 
   lines.push(`  dropped: ${build.dropped.length} var(s) withheld from the harness env`);
+
+  if (skipped.length > 0) {
+    lines.push('  push-scrub OFF (handle still applies; output not scrubbed for):');
+    for (const skip of skipped) {
+      lines.push(`    ${skip.name}`);
+    }
+  }
 
   if (build.warnings.length > 0) {
     lines.push('  advisory:');
@@ -272,6 +287,13 @@ export interface LauncherOptions {
    * point config discovery at fixtures without altering the launch env.
    */
   configEnv?: EnvSnapshot;
+  /**
+   * Secret NAMES whose redaction-eligibility gate is overridden so they are
+   * push-scrubbed despite failing it — the `--force-scrub NAME` override
+   * (DAR-1099, decision #3). Accepts possible output corruption. Defaults to
+   * empty.
+   */
+  forceScrub?: readonly string[];
 }
 
 /**
@@ -351,9 +373,16 @@ export function runLauncher(options: LauncherOptions): Promise<number> {
   build.warnings = [...build.warnings, ...effective.warnings];
   const { env, secrets } = build;
 
+  // Build the gated redaction set (DAR-1099, decision #3) over the handled
+  // secrets: short/low-entropy values are excluded from push-scrubbing and
+  // recorded as skips so the banner can report them (the handle/pull-channel is
+  // unaffected). `--force-scrub` overrides the gate per named secret. The
+  // streaming scrubber that consumes the set is DAR-1102.
+  const gated = buildRedactionSet({ secrets, forceScrub: options.forceScrub });
+
   return startBroker({ secrets, auditLogPath: options.auditLogPath }).then((broker) => {
     env.CHAFF_SOCK = broker.sockPath;
-    stderr.write(formatLaunchBanner(build));
+    stderr.write(formatLaunchBanner(build, gated.skipped));
 
     return new Promise<number>((resolve, reject) => {
       const child = spawn(command, args, { env, stdio: 'inherit' });
