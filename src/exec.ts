@@ -29,15 +29,29 @@
  * real values into a fresh child env object handed to {@link spawn}; the parent's
  * own `process.env` is never mutated, so the harness keeps only handles.
  *
- * Output scrubbing/redaction of the child's stdout/stderr is DAR-1102 (Phase 3)
- * and is deliberately out of scope here — exec emits the child's raw bytes.
+ * Output scrubbing/redaction of the child's stdout/stderr (DAR-1102, Phase 3):
+ * exec pipes the child's stdout and stderr through a streaming redaction
+ * {@link createScrubber scrubber} so only scrubbed bytes reach the harness. The
+ * scrubber's pattern set is built from the very values exec just resolved (every
+ * handle-valued env var = a secret whose NAME, real value and handle exec already
+ * holds), gated by the redaction-eligibility gate (DAR-1099) via
+ * {@link redactionEntriesFromSecrets}. A handle re-appearing in the output is a
+ * bypassed-secret canary: warned to chaff's own stderr and audit-logged by NAME.
  */
 
 import { spawn, type StdioOptions } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { constants } from 'node:os';
+import type { Transform } from 'node:stream';
 import { isHandle } from './handles.js';
 import type { EnvSnapshot } from './policy.js';
+import {
+  createScrubber,
+  redactionEntriesFromSecrets,
+  type HandleEntry,
+  type RedactionEntry,
+} from './scrubber.js';
+import { writeAuditEntry } from './audit.js';
 
 /**
  * The inner shell `chaff exec` spawns the decoded command under, with `-c`.
@@ -129,13 +143,37 @@ export interface ExecOptions {
    */
   sockPath?: string;
   /**
-   * The child's stdio configuration, passed to {@link spawn}. Defaults to
-   * `'inherit'` so the decoded command reads/writes the same streams as the
-   * harness Bash call it replaces (output scrubbing of those streams is DAR-1102,
-   * Phase 3). Tests that capture results via files pass `'ignore'` to avoid
-   * coupling the child to the test runner's own stdio.
+   * Explicit child stdio configuration, passed straight to {@link spawn}. When
+   * provided, the scrubber wiring is bypassed and the child's stdio is used
+   * verbatim — the raw escape hatch for tests that capture results via files
+   * (`'ignore'`) without coupling the child to the runner's own stdio. When
+   * **omitted** (the normal `chaff exec` path), exec inherits stdin but pipes the
+   * child's stdout and stderr through {@link createScrubber} so only scrubbed
+   * bytes reach {@link stdout}/{@link stderr}.
    */
   stdio?: StdioOptions;
+  /**
+   * Where scrubbed stdout bytes are written. Defaults to `process.stdout`. Only
+   * used on the scrubbing path (i.e. when {@link stdio} is omitted).
+   */
+  stdout?: ScrubberSink;
+  /**
+   * Where scrubbed stderr bytes are written, and where the handle-canary warning
+   * is emitted. Defaults to `process.stderr`. Only used on the scrubbing path.
+   */
+  stderr?: ScrubberSink;
+  /**
+   * JSONL audit-log path the handle-canary writes a `canary-handle-leak` entry
+   * to (by NAME, never value). Defaults to `process.env.CHAFF_AUDIT_LOG`; when
+   * neither is set, canary audit entries are skipped (the stderr warning still
+   * fires).
+   */
+  auditLogPath?: string;
+}
+
+/** A minimal byte/string sink — `process.stdout` and `process.stderr` satisfy it. */
+export interface ScrubberSink {
+  write(chunk: string | Buffer): boolean;
 }
 
 /** Snapshot `process.env` into a plain string map (dropping undefined values). */
@@ -161,14 +199,55 @@ export function decodeCommand(args: string[]): string {
   return Buffer.from(blob, 'base64').toString('utf8');
 }
 
+/** The scrubber inputs derived from the resolved env: redaction set + handles. */
+interface ResolvedRedaction {
+  entries: RedactionEntry[];
+  handles: HandleEntry[];
+}
+
+/**
+ * Build the scrubber's redaction set from the inbound snapshot and the resolved
+ * child env. Every handle-valued env var is a secret exec already holds the NAME
+ * (the key), real value (`childEnv[name]`) and handle (the inbound value) for —
+ * so no extra broker round-trip is needed. Patterns are gated by the
+ * redaction-eligibility gate (DAR-1099) via {@link redactionEntriesFromSecrets};
+ * the handle list drives the canary on a bypassed-secret leak.
+ */
+function buildRedaction(
+  snapshot: EnvSnapshot,
+  childEnv: Record<string, string>,
+): ResolvedRedaction {
+  const handles: HandleEntry[] = [];
+  const secrets: { name: string; value: string }[] = [];
+  for (const [name, value] of Object.entries(snapshot)) {
+    if (!isHandle(value)) {
+      continue;
+    }
+    handles.push({ name, handle: value });
+    const resolved = childEnv[name];
+    if (resolved !== undefined) {
+      secrets.push({ name, value: resolved });
+    }
+  }
+  return { entries: redactionEntriesFromSecrets(secrets), handles };
+}
+
 /**
  * Run `chaff exec --b64 <blob>` and resolve with the child's exit code.
  *
  * Decodes the base64 blob into the original command, connects to the broker at
  * `CHAFF_SOCK`, resolves every handle-valued env var into the CHILD env, and
- * spawns `bash -c <decodedCommand>` with that child env (stdio inherited). The
- * decoded string is handed to the inner shell verbatim, so the inner shell — not
- * chaff — parses `$VAR`/pipes/quotes/redirects, against the resolved child env.
+ * spawns `bash -c <decodedCommand>` with that child env. The decoded string is
+ * handed to the inner shell verbatim, so the inner shell — not chaff — parses
+ * `$VAR`/pipes/quotes/redirects, against the resolved child env.
+ *
+ * On the normal path (no explicit {@link ExecOptions.stdio}) exec inherits the
+ * child's stdin but pipes its stdout and stderr through a streaming
+ * {@link createScrubber scrubber}, so only scrubbed bytes reach
+ * {@link ExecOptions.stdout}/{@link ExecOptions.stderr} — a secret printed by the
+ * child (raw or encoded) becomes `[redacted:NAME]`, and a leaked handle fires a
+ * canary warning + audit entry. Passing an explicit `stdio` bypasses the scrubber
+ * (raw mode, for file-capturing tests).
  *
  * Fails loudly (rejects) when `CHAFF_SOCK` is unset rather than silently passing
  * handles through. The child's exit code is propagated (128+signum when the
@@ -187,23 +266,87 @@ export function runExec(options: ExecOptions): Promise<number> {
     );
   }
 
+  const stdout = options.stdout ?? process.stdout;
+  const stderr = options.stderr ?? process.stderr;
+  const auditLogPath = options.auditLogPath ?? process.env.CHAFF_AUDIT_LOG;
+
   return resolveChildEnv(snapshot, (handle) => resolveViaBroker(sockPath, handle)).then(
     (childEnv) =>
       new Promise<number>((resolve, reject) => {
+        // Explicit stdio bypasses scrubbing (raw escape hatch); otherwise pipe
+        // stdout/stderr so they can be routed through per-stream scrubbers.
+        const scrubbing = options.stdio === undefined;
         const child = spawn(INNER_SHELL, ['-c', command], {
           env: childEnv,
-          stdio: options.stdio ?? 'inherit',
+          stdio: scrubbing ? ['inherit', 'pipe', 'pipe'] : options.stdio,
         });
-        child.on('error', reject);
+
+        // Resolve only once BOTH the child has exited AND every scrubber stream
+        // has flushed, so the last scrubbed bytes (the hold-back remainder) are
+        // written before the caller sees the exit code — otherwise a stream-end
+        // secret could be dropped from the captured output.
+        let exitCode: number | undefined;
+        let pendingStreams = 0;
+        const scrubbers: Transform[] = [];
+        const settle = (): void => {
+          if (exitCode !== undefined && pendingStreams === 0) {
+            resolve(exitCode);
+          }
+        };
+
+        if (scrubbing) {
+          const { entries, handles } = buildRedaction(snapshot, childEnv);
+          const onAudit =
+            auditLogPath !== undefined
+              ? (record: { op: string; secretName: string }) =>
+                  writeAuditEntry(auditLogPath, record)
+              : undefined;
+          const wire = (source: NodeJS.ReadableStream | null, sink: ScrubberSink): void => {
+            if (source === null) {
+              return;
+            }
+            const scrubber = createScrubber({
+              entries,
+              handles,
+              onCanary: (name) =>
+                stderr.write(
+                  `chaff: canary — handle for ${name} appeared in output (bypassed secret use)\n`,
+                ),
+              onAudit,
+            });
+            scrubbers.push(scrubber);
+            scrubber.on('data', (chunk: Buffer) => sink.write(chunk));
+            pendingStreams++;
+            scrubber.on('end', () => {
+              pendingStreams--;
+              settle();
+            });
+            source.pipe(scrubber);
+          };
+          // child.stdout/stderr are pipes here ('pipe' stdio above), so non-null.
+          wire(child.stdout, stdout);
+          wire(child.stderr, stderr);
+        }
+
+        child.on('error', (err) => {
+          // The child never started, so the scrubbers will never see `end` and
+          // their hold-back pipes would dangle until GC. Tear them down (the
+          // promise rejects, so no further bytes are emitted) before rejecting.
+          for (const scrubber of scrubbers) {
+            scrubber.destroy();
+          }
+          reject(err);
+        });
         child.on('exit', (code, signal) => {
           if (code !== null) {
-            resolve(code);
-            return;
+            exitCode = code;
+          } else {
+            // Killed by a signal: mirror the shell's 128+signum convention so a
+            // signalled child still reports non-zero (matches the launcher).
+            const signum = signal !== null ? (constants.signals[signal] ?? 0) : 0;
+            exitCode = 128 + signum;
           }
-          // Killed by a signal: mirror the shell's 128+signum convention so a
-          // signalled child still reports non-zero (matches the launcher).
-          const signum = signal !== null ? (constants.signals[signal] ?? 0) : 0;
-          resolve(128 + signum);
+          settle();
         });
       }),
   );
