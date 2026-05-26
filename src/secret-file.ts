@@ -58,8 +58,7 @@ function isSeparator(ch: string | undefined): boolean {
  * platform-neutral and unaffected by the leading directory.
  */
 function basename(path: string): string {
-  const segments = path.split(/[/\\]/);
-  return segments[segments.length - 1] ?? path;
+  return path.replace(/^.*[/\\]/, '');
 }
 
 /** True when `name` matches the segment-anchored pattern (see module doc). */
