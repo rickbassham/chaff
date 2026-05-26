@@ -243,9 +243,9 @@ describe('ac-2: scan reuses buildHarnessEnv bucketing (single source of truth)',
     expect(report.dropped).toEqual(build.dropped);
   });
 
-  it("the entropy-vs-allowlist precedence carve-out is honored by scan because it shares buildHarnessEnv: an allowlisted var whose value trips ONLY the entropy backstop is reported as passthrough (not handle), matching buildHarnessEnv's behavior", () => {
-    // A long high-entropy value on an allowlisted name: entropy backstop fires,
-    // but the explicit allowlist entry wins → passthrough.
+  it("entropy is advisory-only in scan because it shares buildHarnessEnv (DAR-1148): an allowlisted var whose value trips ONLY the entropy backstop is reported as passthrough (not handle), matching buildHarnessEnv's behavior", () => {
+    // A long high-entropy value on an allowlisted name: the entropy backstop
+    // fires but never sources a handle, and the allowlist name passes it through.
     const snapshot = { ENTROPY_OK: 'a8Fk2Lp9Qz3Wm7Xb4Vn6Yc1Td5Rg0Hj' };
     const classification = classify(snapshot, {});
     expect(classification.ENTROPY_OK!.mechanism).toBe('entropy');
@@ -381,7 +381,7 @@ describe('ac-4: seeded env + config produces expected names per bucket; no value
     }
   });
 
-  it("`chaff scan` via the built binary with a seeded high-entropy secret env var emits the var NAME in stdout under handles but never the var's real value on stdout or stderr", () => {
+  it("`chaff scan` via the built binary with a seeded high-entropy unknown env var reports the var NAME under dropped (DAR-1148: entropy never sources a handle) but never the var's real value on stdout or stderr", () => {
     requireBin();
     const realValue = 'a8Fk2Lp9Qz3Wm7Xb4Vn6Yc1Td5Rg0Hj';
     const { stdout, stderr, status } = runChaffScan({ SCAN_ENTROPY_BLOB: realValue });
@@ -390,8 +390,14 @@ describe('ac-4: seeded env + config produces expected names per bucket; no value
     const lines = stdout.split('\n');
     const hIdx = lines.findIndex((l) => l.includes('Would be replaced by handles:'));
     const dIdx = lines.findIndex((l) => l.includes('Dropped from the harness env:'));
+    const aIdx = lines.findIndex((l) => l.includes('Advisories:'));
     const handlesSection = lines.slice(hIdx, dIdx).join('\n');
-    expect(handlesSection).toContain('SCAN_ENTROPY_BLOB');
+    const droppedSection = lines.slice(dIdx, aIdx === -1 ? undefined : aIdx).join('\n');
+    // Entropy is advisory-only: the high-entropy unknown is dropped, not handled.
+    expect(handlesSection).not.toContain('SCAN_ENTROPY_BLOB');
+    expect(droppedSection).toContain('SCAN_ENTROPY_BLOB');
+    // ...and a name-only advisory flags it as secret-like.
+    expect(stdout).toContain('SCAN_ENTROPY_BLOB');
     expect(stdout).not.toContain(realValue);
     expect(stderr).not.toContain(realValue);
   });

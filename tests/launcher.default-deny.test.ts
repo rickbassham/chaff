@@ -319,18 +319,19 @@ describe('ac-3: precedence carve-out — entropy-only match does NOT beat an exp
     expect(warnings.join('\n')).toContain('API_TOKEN');
   });
 
-  it('a non-allowlisted entropy-flagged var is still handled (the carve-out only applies to allowlisted names)', () => {
+  it('a non-allowlisted entropy-flagged var is dropped, not handled (DAR-1148: entropy never sources a handle)', () => {
     const snapshot = { SOME_RANDOM_BLOB: 'aZ9qX2pL7mK4nB8vC1tR' };
     const classification = classify(snapshot, {});
     expect(classification.SOME_RANDOM_BLOB!.mechanism).toBe('entropy');
-    const { env, handles } = buildHarnessEnv({
+    const { env, handles, dropped } = buildHarnessEnv({
       snapshot,
       classification,
       allowlist: [],
       sockPath: SOCK,
     });
-    expect(isHandle(env.SOME_RANDOM_BLOB!)).toBe(true);
-    expect(handles).toContain('SOME_RANDOM_BLOB');
+    expect(dropped).toContain('SOME_RANDOM_BLOB');
+    expect(handles).not.toContain('SOME_RANDOM_BLOB');
+    expect(Object.prototype.hasOwnProperty.call(env, 'SOME_RANDOM_BLOB')).toBe(false);
   });
 });
 

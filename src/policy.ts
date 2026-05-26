@@ -1,15 +1,21 @@
 /**
  * Secret classification policy.
  *
- * Decides, for each env var in a snapshot, whether it is a secret (and so
- * should get a handle downstream). The decision uses three mechanisms, in
- * priority order:
+ * Decides, for each env var in a snapshot, whether it is a secret. The decision
+ * uses three mechanisms, in priority order:
  *
  *   1. allowlist — names explicitly declared never-secret (e.g. PATH, HOME)
  *   2. name globs — names matching a secret-shaped pattern (e.g. `*_KEY`)
  *   3. entropy backstop — unrecognized names whose VALUE looks random
  *
  * Anything that none of these flags falls through as a non-secret `default`.
+ *
+ * Under default-deny (DAR-1139/DAR-1148) the entropy mechanism is **advisory**,
+ * not load-bearing: a var flagged solely by entropy never becomes a handle —
+ * handles come only from name-glob matches ∪ declared-managed. The launcher uses
+ * the `entropy` verdict (and {@link looksHighEntropy}) only to surface a
+ * name-only advisory for a high-entropy var it has *dropped*. The mechanism stays
+ * here so callers can still explain the decision.
  *
  * This module is a pure function: it reads only its `(envSnapshot, config)`
  * arguments, performs no I/O, and does not consult `process.env`. It answers
@@ -85,8 +91,14 @@ function bitsPerChar(value: string): number {
   return bits;
 }
 
-/** Whether `value` looks high-entropy enough to be a secret on its own. */
-function looksHighEntropy(value: string): boolean {
+/**
+ * Whether `value` looks high-entropy enough to be a secret on its own.
+ *
+ * Exported so the launcher can surface a name-only advisory for a *dropped* var
+ * whose value looks secret-like (DAR-1148). Under default-deny the entropy
+ * signal no longer promotes a var to a handle; it only feeds this advisory.
+ */
+export function looksHighEntropy(value: string): boolean {
   return value.length >= ENTROPY_MIN_LENGTH && bitsPerChar(value) >= ENTROPY_MIN_BITS_PER_CHAR;
 }
 
