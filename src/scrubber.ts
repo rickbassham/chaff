@@ -41,8 +41,7 @@
 
 import { Transform } from 'node:stream';
 import { Buffer } from 'node:buffer';
-import { encodedVariants } from './encodings.js';
-import { isRedactionEligible } from './redaction.js';
+import { gatedVariants, isRedactionEligible } from './redaction.js';
 
 /** A secret's NAME and the literal byte patterns whose appearance is redacted. */
 export interface RedactionEntry {
@@ -278,7 +277,14 @@ export interface ScrubberSecret {
  * This is the name-preserving adapter the scrubber needs: {@link buildRedactionSet}
  * dedupes patterns into a flat array without their NAMEs, but the scrubber must
  * emit `[redacted:NAME]`, so this keeps the per-secret NAME alongside its
- * variants. It consumes the gate; it does not change it.
+ * variants. It consumes the gate; it does not change it. Variants run through the
+ * same per-variant length floor as {@link buildRedactionSet} via the shared
+ * {@link gatedVariants} helper, so the two gate-consumption paths cannot drift.
+ *
+ * Note: unlike {@link buildRedactionSet} this adapter does **not** honor
+ * `--force-scrub` (that flag is DAR-1099, not wired into the exec egress path);
+ * tracked separately. A value that fails {@link isRedactionEligible} contributes
+ * no entry here regardless of force-scrub.
  */
 export function redactionEntriesFromSecrets(secrets: ScrubberSecret[]): RedactionEntry[] {
   const entries: RedactionEntry[] = [];
@@ -286,7 +292,7 @@ export function redactionEntriesFromSecrets(secrets: ScrubberSecret[]): Redactio
     if (!isRedactionEligible(secret.value, {})) {
       continue;
     }
-    entries.push({ name: secret.name, patterns: encodedVariants(secret.value) });
+    entries.push({ name: secret.name, patterns: gatedVariants(secret.value, {}) });
   }
   return entries;
 }

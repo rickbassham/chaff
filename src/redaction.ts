@@ -128,6 +128,22 @@ export function isRedactionEligible(value: string, config: RedactionGateConfig):
 }
 
 /**
+ * The encoded variants of `value` that clear the per-variant min-length floor.
+ *
+ * Single source of truth for the floor that stops a short hex/base64 form from
+ * colliding with SHAs/checksums/tokens. Both {@link buildRedactionSet} (the
+ * launcher/broker set) and `redactionEntriesFromSecrets` (the exec-side scrubber
+ * adapter) derive their patterns through this so the two cannot drift. It does
+ * **not** apply the value-level gate ({@link isRedactionEligible}) — callers
+ * decide that, since the launcher honors `forceScrub` and the exec adapter does
+ * not. Pure: derives its result solely from its arguments.
+ */
+export function gatedVariants(value: string, config: RedactionGateConfig): string[] {
+  const minLength = config.minLength ?? DEFAULT_MIN_LENGTH;
+  return encodedVariants(value).filter((variant) => variant.length >= minLength);
+}
+
+/**
  * Build the gated redaction set from a list of classified secrets.
  *
  * For each secret: if it clears the value-level gate ({@link isRedactionEligible})
@@ -149,7 +165,6 @@ export function isRedactionEligible(value: string, config: RedactionGateConfig):
  */
 export function buildRedactionSet(options: BuildRedactionSetOptions): GatedRedactionSet {
   const config = options.config ?? {};
-  const minLength = config.minLength ?? DEFAULT_MIN_LENGTH;
   const forceScrub = new Set(options.forceScrub ?? []);
 
   const patterns: string[] = [];
@@ -164,14 +179,12 @@ export function buildRedactionSet(options: BuildRedactionSetOptions): GatedRedac
       skipped.push({ name: secret.name });
       continue;
     }
-    for (const variant of encodedVariants(secret.value)) {
-      // Per-variant length check: a variant below min-length is dropped so a
-      // short form cannot collide with unrelated SHAs/checksums/tokens in
-      // output. Applies even under force-scrub — the override accepts corruption
-      // from the value's long forms, never from a collision-prone short one.
-      if (variant.length < minLength) {
-        continue;
-      }
+    // Per-variant length floor (shared with the exec-side scrubber adapter via
+    // {@link gatedVariants}): a variant below min-length is dropped so a short
+    // form cannot collide with unrelated SHAs/checksums/tokens in output.
+    // Applies even under force-scrub — the override accepts corruption from the
+    // value's long forms, never from a collision-prone short one.
+    for (const variant of gatedVariants(secret.value, config)) {
       if (!seen.has(variant)) {
         seen.add(variant);
         patterns.push(variant);

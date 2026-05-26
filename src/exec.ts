@@ -42,6 +42,7 @@
 import { spawn, type StdioOptions } from 'node:child_process';
 import { createConnection } from 'node:net';
 import { constants } from 'node:os';
+import type { Transform } from 'node:stream';
 import { isHandle } from './handles.js';
 import type { EnvSnapshot } from './policy.js';
 import {
@@ -286,6 +287,7 @@ export function runExec(options: ExecOptions): Promise<number> {
         // secret could be dropped from the captured output.
         let exitCode: number | undefined;
         let pendingStreams = 0;
+        const scrubbers: Transform[] = [];
         const settle = (): void => {
           if (exitCode !== undefined && pendingStreams === 0) {
             resolve(exitCode);
@@ -312,6 +314,7 @@ export function runExec(options: ExecOptions): Promise<number> {
                 ),
               onAudit,
             });
+            scrubbers.push(scrubber);
             scrubber.on('data', (chunk: Buffer) => sink.write(chunk));
             pendingStreams++;
             scrubber.on('end', () => {
@@ -325,7 +328,15 @@ export function runExec(options: ExecOptions): Promise<number> {
           wire(child.stderr, stderr);
         }
 
-        child.on('error', reject);
+        child.on('error', (err) => {
+          // The child never started, so the scrubbers will never see `end` and
+          // their hold-back pipes would dangle until GC. Tear them down (the
+          // promise rejects, so no further bytes are emitted) before rejecting.
+          for (const scrubber of scrubbers) {
+            scrubber.destroy();
+          }
+          reject(err);
+        });
         child.on('exit', (code, signal) => {
           if (code !== null) {
             exitCode = code;
