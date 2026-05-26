@@ -40,7 +40,7 @@ import { constants, homedir } from 'node:os';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { formatHandle } from './handles.js';
-import { classify, type Classification, type EnvSnapshot } from './policy.js';
+import { classify, looksHighEntropy, type Classification, type EnvSnapshot } from './policy.js';
 import { startBroker, type BrokerSecret } from './broker.js';
 import { loadEffectiveConfig } from './config.js';
 import { buildRedactionSet, type RedactionSkip } from './redaction.js';
@@ -53,9 +53,11 @@ import { buildRedactionSet, type RedactionSkip } from './redaction.js';
  *
  * The set is intentionally minimal and benign — terminal/locale/path plumbing a
  * shell and ordinary tools need to function, none of which carries a secret. A
- * value that happens to match here but also looks secret is still handled, not
- * passed (see the precedence rule in {@link buildHarnessEnv}). User/folder
- * config extends this set later (DAR-1140); here it is just the shipped default.
+ * name here that also matches a secret-shaped glob (a NAME signal) is still
+ * handled, not passed (see the precedence rule in {@link buildHarnessEnv}); a
+ * high-entropy *value* alone does not demote it — entropy never sources a handle
+ * (DAR-1148). User/folder config extends this set later (DAR-1140); here it is
+ * just the shipped default.
  */
 export const DEFAULT_PASSTHROUGH_ALLOWLIST: readonly string[] = [
   'PATH',
@@ -101,9 +103,11 @@ export interface HarnessEnvBuild {
   /** Names dropped entirely (neither allowlisted nor a managed secret). Sorted. */
   dropped: string[];
   /**
-   * Advisory warnings (by NAME, never a value) — currently one per
+   * Advisory warnings (by NAME, never a value): one per
    * allowlisted-but-secret-looking var that was handled rather than passed
-   * through (the precedence rule). The launcher surfaces these in the banner.
+   * through (the precedence rule), and one per *dropped* var whose value looks
+   * high-entropy (DAR-1148 — entropy is advisory, so a secret-like dropped var
+   * is flagged so it is discoverable). The launcher surfaces these in the banner.
    */
   warnings: string[];
 }
@@ -140,17 +144,17 @@ export interface BuildHarnessEnvOptions {
  * result.
  *
  * Each var lands in exactly one bucket:
- *   - **handle** if it is a managed secret (detected-secret ∪ declared-managed).
- *     This is checked FIRST so an allowlisted-but-secret-looking var is handled,
- *     not passed (the precedence rule) — and an advisory warning naming it (by
- *     NAME only) is emitted. Carve-out: a var detected solely by the *entropy*
- *     backstop (a value-guess, not a name signal) does NOT win over an explicit
- *     allowlist entry — the allowlisted name is authoritative, so it passes
- *     through verbatim with no warning. Name-glob and declared-managed matches
- *     are intentional secret signals and still take precedence.
+ *   - **handle** if it is a managed secret — a NAME signal only: a name-glob
+ *     match or a declared-managed entry (DAR-1148: the entropy backstop is a
+ *     value-guess, not a name signal, and never sources a handle). Checked FIRST
+ *     so an allowlisted-but-secret-looking var is handled, not passed (the
+ *     precedence rule) — and an advisory warning naming it (by NAME only) is
+ *     emitted.
  *   - **passthrough** if its name matches the effective allowlist → value
  *     verbatim.
- *   - **dropped** otherwise → absent from the harness env (name and value).
+ *   - **dropped** otherwise → absent from the harness env (name and value). If
+ *     the dropped value looks high-entropy, a name-only advisory is emitted so a
+ *     secret-like dropped var is discoverable (never the value).
  *
  * `CHAFF_SOCK` is always set to `sockPath` — the only extra key, never a secret
  * value or auth token, present even when every var is dropped.
@@ -170,19 +174,20 @@ export function buildHarnessEnv(options: BuildHarnessEnvOptions): HarnessEnvBuil
   for (const [name, value] of Object.entries(snapshot)) {
     const verdict = classification[name];
     const allowlisted = isAllowlisted(name);
-    // The entropy backstop is a value-guess, not a name signal: a long
-    // high-entropy value (e.g. a realistic macOS TMPDIR `/var/folders/...`)
-    // trips it. An explicit allowlist entry is a deliberate name signal and must
-    // beat that guess — otherwise a documented passthrough var is demoted to a
-    // handle the harness cannot resolve (resolution is Phase 2, DAR-1101).
-    // Name-glob and declared-managed matches are NOT carved out: those are
-    // intentional secret signals, so the precedence rule still handles them.
-    const detectedSecret =
-      verdict?.secret === true && !(verdict.mechanism === 'entropy' && allowlisted);
+    // A handle comes only from a NAME signal: a secret-shaped glob (e.g.
+    // `*_TOKEN`) or an explicit declared-managed entry. The entropy backstop is
+    // a VALUE-guess, not a name signal (DAR-1148): it never promotes a var to a
+    // handle, so a long high-entropy value (a realistic macOS TMPDIR
+    // `/var/folders/...`, `LS_COLORS`, a long `GOROOT`) is bucketed by name
+    // alone — passthrough if allowlisted, dropped otherwise. Demoting entropy to
+    // advisory makes all unknowns consistent (not allowlisted ∧ not a name
+    // signal ⇒ dropped) and keeps benign high-entropy values out of the broker
+    // and (Phase 3) the redaction set.
+    const detectedSecret = verdict?.secret === true && verdict.mechanism !== 'entropy';
     const managed = detectedSecret || declaredManaged.has(name);
 
     if (managed) {
-      // Handle bucket wins over passthrough: never pass a secret-looking value
+      // Handle bucket wins over passthrough: never pass a name-signalled secret
       // through. If it was also allowlisted, that is the precedence case — warn.
       const handle = formatHandle(name);
       env[name] = handle;
@@ -197,8 +202,16 @@ export function buildHarnessEnv(options: BuildHarnessEnvOptions): HarnessEnvBuil
       env[name] = value;
       passthrough.push(name);
     } else {
-      // Dropped: absent from the harness env entirely (name and value).
+      // Dropped: absent from the harness env entirely (name and value). If the
+      // value looks high-entropy, surface a name-only advisory (DAR-1148) so a
+      // dropped secret-like var is discoverable — it fails safe (the tool breaks
+      // visibly) rather than silently. Never name the value.
       dropped.push(name);
+      if (looksHighEntropy(value)) {
+        warnings.push(
+          `${name} looks secret-like and was dropped; declare it managed or allowlist it if a tool needs it`,
+        );
+      }
     }
   }
 

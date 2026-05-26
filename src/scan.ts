@@ -104,12 +104,13 @@ export interface BuildScanReportOptions {
  * bucket lists and advisory warnings are reported. Pure: derives its result
  * solely from its arguments.
  *
- * Because the buckets flow through `buildHarnessEnv`, scan inherits its
- * precedence rules verbatim: handle-over-passthrough (an allowlisted var that is
- * also a name-glob/declared-managed secret is reported as a handle), and the
- * entropy-vs-allowlist carve-out (an allowlisted var tripping only the entropy
- * backstop passes through). The advisories combine `buildHarnessEnv`'s own
- * precedence-rule warnings with any `configWarnings` (folder-trust) passed in.
+ * Because the buckets flow through `buildHarnessEnv`, scan inherits its rules
+ * verbatim: handle-over-passthrough (an allowlisted var that is also a
+ * name-glob/declared-managed secret is reported as a handle), and entropy as
+ * advisory-only (DAR-1148 — a var flagged solely by entropy is never a handle:
+ * it passes through if allowlisted, else is dropped, with a name-only advisory
+ * when its value looks high-entropy). The advisories combine `buildHarnessEnv`'s
+ * own warnings with any `configWarnings` (folder-trust) passed in.
  */
 export function buildScanReport(options: BuildScanReportOptions): ScanReport {
   const build: HarnessEnvBuild = buildHarnessEnv({

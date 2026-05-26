@@ -103,21 +103,35 @@ heuristics (globs / allowlist / entropy in `policy.ts`) are **reused but
 demoted from load-bearing to advisory**: they suggest the managed set and raise
 a tripwire warning, but they no longer decide what is safe to expose.
 
+**Handles come only from a NAME signal.** A var becomes a handle iff its name
+matches a secret-shaped glob (like `*_TOKEN`) **or** it is declared-managed.
+The **entropy backstop never sources a handle** (DAR-1148): it is a guess from
+the _value_, not the name, and under default-deny it is no longer load-bearing
+for safety — a missed unknown is _dropped_, not leaked, the same non-leaking
+outcome a handle would give. Demoting it makes all unknowns consistent: not
+allowlisted ∧ not a name signal ⇒ **dropped**, regardless of entropy. This also
+keeps benign high-entropy values (`LS_COLORS`, a long `GOROOT`, `npm_package_*`,
+a realistic `TMPDIR` `/var/folders/...`) out of the broker and (Phase 3) the
+redaction set, where they would otherwise corrupt legitimate child output.
+
 **Fail-safe over fail-open.** A secret the heuristics miss _and_ nobody
 allowlisted is **dropped** — a tool may break, visibly — rather than leaked.
-**Precedence:** a var that is both allowlisted _and_ detected-secret by a
-**name signal** (a secret-shaped glob like `*_TOKEN`, or declared-managed) is
-treated as a **handle** (never pass a secret-looking value through), with an
-advisory warning naming it. The one carve-out is the **entropy backstop**: it
-guesses from the _value_, not the name, and a long high-entropy value is exactly
-what allowlisted path vars like `TMPDIR` (`/var/folders/...`) and `XDG_RUNTIME_DIR`
-carry. An explicit allowlist entry is a deliberate name signal and therefore
-beats an entropy-only guess — such a var passes through verbatim with no warning,
-rather than being demoted to a handle the harness cannot yet resolve (resolution
-is Phase 2, DAR-1101). A non-allowlisted entropy-flagged var is still handled.
-The launch banner reports per bucket — passthrough **count**,
-handle **names**, dropped **count**, plus advisory warnings — names only, never
-values, to stderr so it cannot contaminate the harness's stdout.
+When a _dropped_ var's value looks high-entropy, a name-only **advisory** is
+surfaced (launch banner + `chaff scan`) — e.g. "FOO looks secret-like and was
+dropped; declare it managed or allowlist it if a tool needs it" — so an
+oddly-named undeclared secret is discoverable rather than silently broken; the
+advisory names the var, never its value.
+
+**Precedence:** a var that is both allowlisted _and_ a name-signal secret (a
+secret-shaped glob, or declared-managed) is treated as a **handle** (never pass
+a name-signalled secret-looking value through), with an advisory warning naming
+it. An allowlisted var whose only secret signal is high entropy (like `TMPDIR`)
+passes through **verbatim with no warning** — the allowlisted name is
+authoritative and entropy no longer competes with it, so no allowlist-specific
+entropy carve-out is needed. The launch banner reports per bucket —
+passthrough **count**, handle **names**, dropped **count**, plus advisory
+warnings — names only, never values, to stderr so it cannot contaminate the
+harness's stdout.
 
 ## Project layout (mirror commonplace's shape)
 
