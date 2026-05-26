@@ -398,9 +398,11 @@ export function runLauncher(options: LauncherOptions): Promise<number> {
     // Carry the `--force-scrub` NAME set across the process boundary into each
     // `chaff exec` child via CHAFF_FORCE_SCRUB (DAR-1150). The exec egress
     // scrubber rebuilds its pattern set locally, so it cannot see the launcher's
-    // force-scrub state otherwise; this env var is the channel (NAMEs are
-    // env-var names, so a comma separator is unambiguous). Only set when
-    // non-empty so the common no-force-scrub case leaves the env untouched.
+    // force-scrub state otherwise; this env var is the channel. The comma
+    // separator is unambiguous because parseForceScrub (src/cli.ts) rejects any
+    // NAME that is not a valid env-var name at parse time, so a NAME can never
+    // contain a comma (DAR-1151). Only set when non-empty so the common
+    // no-force-scrub case leaves the env untouched.
     const forceScrub = options.forceScrub ?? [];
     if (forceScrub.length > 0) {
       env.CHAFF_FORCE_SCRUB = forceScrub.join(',');

@@ -188,9 +188,10 @@ export interface ExecOptions {
 /**
  * The harness env var carrying the `--force-scrub` NAME set from `chaff run`'s
  * launcher process into each `chaff exec` child (the egress scrubber). Comma
- * (`,`) separated; NAMEs are env-var names so they never contain a comma.
- * Seeded by the launcher (buildHarnessEnv) and read here as the
- * {@link ExecOptions.forceScrub} default.
+ * (`,`) separated; the comma separator is unambiguous because `parseForceScrub`
+ * (`src/cli.ts`) rejects any NAME that is not a valid env-var name at parse time,
+ * so a NAME can never contain a comma (DAR-1151). Seeded by the launcher
+ * (buildHarnessEnv) and read here as the {@link ExecOptions.forceScrub} default.
  */
 export const CHAFF_FORCE_SCRUB_ENV = 'CHAFF_FORCE_SCRUB';
 
