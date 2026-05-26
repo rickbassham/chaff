@@ -40,6 +40,10 @@ export interface HookDispatchOutput {
   hookSpecificOutput?: {
     hookEventName: 'PreToolUse';
     updatedInput?: { command: string };
+    // `'allow'` is part of Claude Code's hookSpecificOutput shape but is not
+    // emitted by this module today: the Bash leg rewrites the command and the
+    // read-family legs only ever deny or decline. Kept in the union so a sibling
+    // (DAR-1105/1106) can return it without widening this type.
     permissionDecision?: 'allow' | 'deny';
     permissionDecisionReason?: string;
   };
@@ -81,6 +85,10 @@ export function dispatchHook(input: PreToolUseInput, options: DispatchOptions): 
   if (READ_TOOLS.has(input.tool_name)) {
     const decideSecretFile = options.decideSecretFile ?? declineRead;
     const secretFile = decideSecretFile(input);
+    // Decline contract: a read-decision fn declines by returning exactly `{}`
+    // (no `hookSpecificOutput`). Any present `hookSpecificOutput` is treated as
+    // a real decision and short-circuits the strict-reads leg, so the DAR-1105
+    // fn must omit it when it does not deny.
     if (secretFile.hookSpecificOutput !== undefined) {
       return secretFile;
     }
