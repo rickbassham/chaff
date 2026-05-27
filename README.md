@@ -231,4 +231,14 @@ make build         # tsc -> dist/
 make verify        # format-check + lint + typecheck + test + build (the CI gate)
 ```
 
-Requires Node >= 22 (see `package.json` `engines`) and pnpm.
+Requires Node and pnpm. The two Node-version sources in this repo are
+deliberately different, not contradictory:
+
+- **Supported floor: Node `>= 22`** — declared in `package.json` `engines.node`.
+  This is the lowest version chaff supports, and CI tests against both Node 22
+  and Node 24.
+- **Recommended dev/latest: Node `24`** — pinned in `.nvmrc`, so `nvm use`
+  lands on the version we develop against day to day.
+
+In short: build on anything at or above the `>= 22` floor; for local
+development, prefer the `24` that `.nvmrc` selects.
