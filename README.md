@@ -108,7 +108,7 @@ turn the scrubber into a destructive find-replace — e.g. matching `cafe` insid
 build hash, or rewriting `npm test`. So such a value **still gets a handle** (the
 pull channel is intact) but its **push-channel scrubbing is disabled by
 default.** This is an **accepted, reported gap**: `chaff scan` and the launch
-banner announce it loudly ("push-scrub OFF for X — handle still applies"), and
+banner announce it loudly (`push-scrub OFF (handle still applies; output not scrubbed for):`), and
 `chaff run --force-scrub NAME` is the explicit override that re-enables scrubbing
 for a named secret while accepting possible output corruption. See [`PLAN.md` —
 decision #3](./PLAN.md#3--redaction-eligibility-is-separate-from-classification).
