@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createServer } from 'node:net';
 import {
   scanTree,
   fetchRedactionValues,
@@ -119,6 +120,36 @@ describe('runTreeScan — degrades, never fails the scan (ac-2, f-1)', () => {
       expect(result.reason.toLowerCase()).toContain('broker unreachable');
     }
   });
+
+  it('degrades to a skipped result when the broker connects but never sends a response (a hung broker must not hang the scan — f-2)', async () => {
+    // A broker that accepts the connection but never writes a
+    // newline-terminated line. Without a socket timeout fetchRedactionValues
+    // would hang forever; with it the fetch rejects on timeout and runTreeScan
+    // degrades to a skip. Uses real time (the socket timeout is a libuv timer
+    // that fake timers do not drive); the production timeout is short enough to
+    // resolve well within the test budget.
+    const silentSock = join(tmp, 'silent.sock');
+    const conns: import('node:net').Socket[] = [];
+    const server = createServer((conn) => {
+      // Accept and stay silent — never write a response line. Track the
+      // server-side socket so cleanup can destroy it (server.close() otherwise
+      // waits for this still-open connection and the test would hang).
+      conns.push(conn);
+    });
+    try {
+      await new Promise<void>((resolve) => server.listen(silentSock, resolve));
+      const result = await runTreeScan({ cwd: tmp, sockPath: silentSock });
+      expect(result.kind).toBe('skipped');
+      if (result.kind === 'skipped') {
+        expect(result.reason.toLowerCase()).toContain('broker unreachable');
+      }
+    } finally {
+      for (const conn of conns) {
+        conn.destroy();
+      }
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 10000);
 });
 
 describe('formatTreeFindings — detective rendering (ac-2)', () => {

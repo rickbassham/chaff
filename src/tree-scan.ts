@@ -131,16 +131,31 @@ export function formatTreeFindings(findings: readonly TreeFinding[]): string {
 }
 
 /**
+ * Milliseconds the broker fetch waits for a complete newline-terminated response
+ * before giving up. A detective scan that hangs indefinitely is worse than one
+ * that skips, so on timeout we destroy the socket and reject (which
+ * {@link runTreeScan} degrades to a skip). Short, since the broker answers a
+ * local socket immediately when healthy.
+ */
+const FETCH_TIMEOUT_MS = 2000;
+
+/**
  * Fetch the broker's known redaction-set values over the `CHAFF_SOCK` socket.
  * Sends one `redaction-set` request and resolves with the `patterns` (the real
  * secret values). Uses the broker's newline-delimited JSON wire protocol
  * (broker.ts): write one request line, read one response line. Rejects on a
- * connection error or a malformed response.
+ * connection error, a malformed response, or a timeout (a broker that connects
+ * but never sends a newline-terminated line, which would otherwise hang the
+ * scan forever).
  */
 export function fetchRedactionValues(sockPath: string): Promise<string[]> {
   return new Promise<string[]>((resolve, reject) => {
     const conn = createConnection(sockPath);
     let buf = '';
+    conn.setTimeout(FETCH_TIMEOUT_MS, () => {
+      conn.destroy();
+      reject(new Error('broker redaction-set fetch timed out'));
+    });
     conn.on('error', reject);
     conn.on('connect', () => {
       conn.write(JSON.stringify({ op: 'redaction-set' }) + '\n');
@@ -157,7 +172,7 @@ export function fetchRedactionValues(sockPath: string): Promise<string[]> {
       try {
         parsed = JSON.parse(line);
       } catch (err) {
-        reject(err as Error);
+        reject(err instanceof Error ? err : new Error(String(err)));
         return;
       }
       const res = parsed as { patterns?: unknown };
