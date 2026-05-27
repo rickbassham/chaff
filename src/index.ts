@@ -14,3 +14,5 @@ export * from './policy.js';
 export * from './redaction.js';
 export * from './scan.js';
 export * from './secret-file.js';
+export * from './strict-reads.js';
+export * from './tree-scan.js';

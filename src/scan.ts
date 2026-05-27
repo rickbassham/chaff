@@ -28,9 +28,16 @@
  * Redaction-gate skip reporting (DAR-1099, decision #3) is wired here: scan runs
  * the same {@link buildRedactionSet} gate the launcher applies over the secrets
  * it would hand off, and reports the NAME-only skips so `chaff scan` is never
- * silent about a gated-out secret. The working-tree secret scan plus
- * `--strict-reads` (DAR-1106, Phase 4) extend this command later and are out of
- * scope here.
+ * silent about a gated-out secret.
+ *
+ * The working-tree secret scan (DAR-1106, decision #4) is also wired here: a
+ * detective control that — when `CHAFF_SOCK` points at a running broker — greps
+ * `cwd` for the broker's known secret values and appends a WARNING by file
+ * location only (never a value). It is detective, not preventive: it never
+ * blocks and `chaff scan` still exits 0. The pure walk + broker fetch live in
+ * {@link import('./tree-scan.js')}; only the orchestration is here. The
+ * `--strict-reads` hook leg (the other half of DAR-1106) lives in the hook path
+ * ({@link import('./strict-reads.js')}), not in this command.
  */
 
 import { classify, type Classification, type EnvSnapshot } from './policy.js';
@@ -41,6 +48,7 @@ import {
 } from './launcher.js';
 import { loadEffectiveConfig } from './config.js';
 import { buildRedactionSet, type RedactionSkip } from './redaction.js';
+import { runTreeScan, formatTreeScanResult } from './tree-scan.js';
 
 /**
  * A var-name partition of an env snapshot under the default-deny model: the
@@ -154,8 +162,9 @@ export function buildScanReport(options: BuildScanReportOptions): ScanReport {
  * and computes nothing per-var). When there are no advisories and the dropped
  * bucket is empty, no advisory section is emitted.
  *
- * The working-tree scan section (DAR-1106, Phase 4) can be appended later
- * without reworking this format.
+ * The working-tree scan section (DAR-1106) is appended by {@link runScan} after
+ * this report (via {@link import('./tree-scan.js').formatTreeScanResult}), so
+ * this formatter stays focused on the env-classification buckets.
  *
  * `skipped` (DAR-1099, decision #3) names secrets the redaction-eligibility gate
  * excluded from push-scrubbing. When non-empty, a push-scrub-OFF section names
@@ -241,6 +250,12 @@ export interface ScanOptions {
    * despite failing the gate, so it is not reported as a skip. Defaults to empty.
    */
   forceScrub?: readonly string[];
+  /**
+   * Broker socket path for the working-tree secret scan (DAR-1106). Defaults to
+   * `process.env.CHAFF_SOCK`. When unset, the tree scan is reported as skipped
+   * (no broker to read known secret values from) rather than run.
+   */
+  sockPath?: string;
 }
 
 /** Snapshot `process.env` into a plain string map (dropping undefined values). */
@@ -256,19 +271,27 @@ function snapshotProcessEnv(): EnvSnapshot {
 
 /**
  * Run the `chaff scan` dry-run and return its exit code (always 0 — scan never
- * fails on classification alone). Snapshots the env, loads the effective
- * allowlist + declared-managed config (defaults → user → folder), buckets the
- * snapshot by reusing {@link buildHarnessEnv}, and writes the report to stdout.
- * Starts no broker and spawns no process.
+ * fails on classification alone, and the working-tree scan is detective, not
+ * preventive). Snapshots the env, loads the effective allowlist + declared-managed
+ * config (defaults → user → folder), buckets the snapshot by reusing
+ * {@link buildHarnessEnv}, and writes the report to stdout.
+ *
+ * It also runs the working-tree secret scan (DAR-1106): when `CHAFF_SOCK` is set
+ * it fetches the broker's known redaction-set values and greps `cwd` for them,
+ * appending a detective WARNING (by file location only, never a value) when any
+ * are found on disk. When `CHAFF_SOCK` is unset the tree scan is reported as
+ * skipped. Scan itself starts no broker and spawns no process; the tree scan only
+ * *connects* to an already-running broker when its socket path is provided.
  */
-export function runScan(options: ScanOptions = {}): number {
+export async function runScan(options: ScanOptions = {}): Promise<number> {
   const snapshot = options.env ?? snapshotProcessEnv();
   const stdout = options.stdout ?? process.stdout;
+  const cwd = options.cwd ?? process.cwd();
 
   const effective = loadEffectiveConfig({
     defaults: DEFAULT_PASSTHROUGH_ALLOWLIST,
     configEnv: options.configEnv ?? snapshotProcessEnv(),
-    cwd: options.cwd ?? process.cwd(),
+    cwd,
     snapshot,
   });
 
@@ -282,5 +305,12 @@ export function runScan(options: ScanOptions = {}): number {
     forceScrub: options.forceScrub,
   });
   stdout.write(formatScanReport(report, report.skipped));
+
+  // Working-tree secret scan (DAR-1106): detective control, always exit 0. The
+  // sockPath defaults to CHAFF_SOCK; when unset, runTreeScan returns a skip.
+  const sockPath = options.sockPath ?? process.env.CHAFF_SOCK;
+  const treeResult = await runTreeScan({ cwd, sockPath });
+  stdout.write('\n' + formatTreeScanResult(treeResult));
+
   return 0;
 }

@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +18,7 @@ import { classify } from '../src/policy.js';
 import { buildHarnessEnv, DEFAULT_PASSTHROUGH_ALLOWLIST } from '../src/launcher.js';
 import { type LevelConfig } from '../src/config.js';
 import { buildScanReport, formatScanReport, runScan, type ScanReport } from '../src/scan.js';
+import { startBroker, type Broker } from '../src/broker.js';
 import { writeConfig } from './helpers/config-seed.js';
 
 const SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
@@ -438,13 +439,16 @@ describe('DAR-1099: scan reports redaction-gate skips (push-scrub OFF), never si
     expect(text).toContain('WEAK_KEY');
   });
 
-  it('runScan writes a gated-out secret NAME under push-scrub OFF and never its value', () => {
+  it('runScan writes a gated-out secret NAME under push-scrub OFF and never its value', async () => {
     const realValue = 'test'; // *_KEY → handle, but fails the redaction gate
     const chunks: string[] = [];
-    const status = runScan({
+    const status = await runScan({
       env: { GATED_KEY: realValue, PATH: '/usr/bin' },
       configEnv: {},
       cwd: tmp,
+      // No broker in this unit context: pin sockPath empty so the working-tree
+      // scan reports skipped rather than depending on an ambient CHAFF_SOCK.
+      sockPath: '',
       stdout: { write: (c) => (chunks.push(c), true) },
     });
     const out = chunks.join('');
@@ -487,5 +491,94 @@ describe('guard: scan is a pure dry-run — starts no broker, binds no socket', 
     // so the dir stays empty. A regression that made scan start the broker (e.g.
     // buildScanReport gaining a startBroker call) would leave an entry here.
     expect(readdirSync(runtimeDir)).toEqual([]);
+  });
+});
+
+describe('DAR-1106: chaff scan working-tree secret scan (detective control)', () => {
+  let broker: Broker | undefined;
+
+  afterEach(() => {
+    broker?.close();
+    broker = undefined;
+  });
+
+  // Drive runScan in-process so the same process hosts both the broker and the
+  // scan: runScan is async, so it yields to the event loop and the broker can
+  // service the tree-scan's redaction-set fetch over CHAFF_SOCK. (Spawning the
+  // built bin while the broker lives in this synchronous test process would
+  // deadlock — execFileSync blocks the event loop the broker accepts on.) This
+  // is still the scan code path end-to-end: a real broker socket fetch, a real
+  // tree grep, and the real report writer.
+  async function scanCwd(args: {
+    cwd: string;
+    sockPath: string | undefined;
+  }): Promise<{ stdout: string; status: number }> {
+    const chunks: string[] = [];
+    const status = await runScan({
+      env: {},
+      configEnv: {},
+      cwd: args.cwd,
+      sockPath: args.sockPath,
+      stdout: { write: (c) => (chunks.push(c), true) },
+    });
+    return { stdout: chunks.join(''), status };
+  }
+
+  it("the working-tree scan obtains its known values from the broker redaction-set op via CHAFF_SOCK (given a running broker holding a secret, scanning a tree containing that secret's value flags the file); when CHAFF_SOCK is unset it reports that the tree scan was skipped rather than crashing", async () => {
+    const secret = 'sk-WORKTREE-INTEG-0123456789abcdef';
+    broker = await startBroker({
+      secrets: [{ name: 'API_KEY', value: secret, handle: 'chaff:1:API_KEY:0123456789ab' }],
+      auditLogPath: join(tmp, 'audit.jsonl'),
+    });
+
+    const tree = join(tmp, 'tree');
+    mkdirSync(join(tree, 'sub'), { recursive: true });
+    writeFileSync(join(tree, 'sub', 'leaked.txt'), `key=${secret}\n`, 'utf8');
+
+    // With CHAFF_SOCK pointing at the broker, scanning that tree flags the file
+    // by location — and never prints the secret value.
+    const withSock = await scanCwd({ cwd: tree, sockPath: broker.sockPath });
+    expect(withSock.status).toBe(0);
+    expect(withSock.stdout).toContain('leaked.txt');
+    expect(withSock.stdout).not.toContain(secret);
+
+    // Without CHAFF_SOCK the tree scan is skipped (no broker to fetch values
+    // from), reported as a skip rather than crashing; still exits 0.
+    const noSock = await scanCwd({ cwd: tree, sockPath: '' });
+    expect(noSock.status).toBe(0);
+    expect(noSock.stdout.toLowerCase()).toContain('skipped');
+  });
+
+  it('the working-tree scan emits a detective warning (not a preventive deny/error) and chaff scan still exits 0 when a planted secret is found — it warns, it does not block', async () => {
+    const secret = 'sk-WORKTREE-DETECTIVE-0123456789ab';
+    broker = await startBroker({
+      secrets: [{ name: 'API_KEY', value: secret, handle: 'chaff:1:API_KEY:0123456789ab' }],
+      auditLogPath: join(tmp, 'audit.jsonl'),
+    });
+    const tree = join(tmp, 'tree');
+    mkdirSync(tree, { recursive: true });
+    writeFileSync(join(tree, 'app.env'), `API_KEY=${secret}\n`, 'utf8');
+
+    const { stdout, status } = await scanCwd({ cwd: tree, sockPath: broker.sockPath });
+    // Detective: warns, exits 0 (does not deny/block).
+    expect(status).toBe(0);
+    expect(stdout.toLowerCase()).toMatch(/warn/);
+    expect(stdout).toContain('app.env');
+  });
+
+  it('chaff scan working-tree mode over a temp dir containing a file with a planted known redaction value flags that file (planted-secret detection), exercised through the scan code path end-to-end', async () => {
+    const secret = 'sk-WORKTREE-PLANTED-0123456789abcd';
+    broker = await startBroker({
+      secrets: [{ name: 'TOKEN', value: secret, handle: 'chaff:1:TOKEN:0123456789ab' }],
+      auditLogPath: join(tmp, 'audit.jsonl'),
+    });
+    const tree = join(tmp, 'tree');
+    mkdirSync(join(tree, 'nested'), { recursive: true });
+    writeFileSync(join(tree, 'nested', 'planted.json'), `{"token":"${secret}"}\n`, 'utf8');
+
+    const { stdout, status } = await scanCwd({ cwd: tree, sockPath: broker.sockPath });
+    expect(status).toBe(0);
+    expect(stdout).toContain('planted.json');
+    expect(stdout).not.toContain(secret);
   });
 });

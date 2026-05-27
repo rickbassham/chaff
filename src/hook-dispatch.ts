@@ -18,13 +18,15 @@
  * *routing* of Read/Glob/Grep to the secret-file (DAR-1105) and `--strict-reads`
  * (DAR-1106) decision functions. The secret-file fn defaults to the real
  * {@link import('./secret-file.js').decideSecretFile} (DAR-1105); the
- * `--strict-reads` fn is still injected (its real logic lands in DAR-1106).
- * Either way the dispatcher never fabricates a deny — it emits only what the
- * decision fn returns.
+ * `--strict-reads` fn defaults to the real
+ * {@link import('./strict-reads.js').decideStrictReads} (DAR-1106), consulted
+ * only when `--strict-reads` is set. Either way the dispatcher never fabricates
+ * a deny — it emits only what the decision fn returns.
  */
 
 import { decideHookOutput, type HookOutput, type PreToolUseInput } from './hook.js';
 import { decideSecretFile } from './secret-file.js';
+import { decideStrictReads } from './strict-reads.js';
 
 /** The read-family tools whose reads route to the deny / strict-reads legs. */
 const READ_TOOLS = new Set(['Read', 'Glob', 'Grep']);
@@ -59,9 +61,6 @@ export interface HookDispatchOutput {
  */
 export type ReadDecision = (input: PreToolUseInput) => HookDispatchOutput;
 
-/** A read-family decision fn that always declines. The safe default. */
-const declineRead: ReadDecision = () => ({});
-
 /** Options controlling dispatch. The injected decision fns default to declining. */
 export interface DispatchOptions {
   /** Whether the bin's argv carried `--strict-reads`; gates the strict-reads leg. */
@@ -70,7 +69,7 @@ export interface DispatchOptions {
   decideBash?: (input: PreToolUseInput) => HookOutput;
   /** The secret-file deny decision fn (DAR-1105). Defaults to {@link decideSecretFile}. */
   decideSecretFile?: ReadDecision;
-  /** The strict-reads deny decision fn (DAR-1106). Defaults to declining. */
+  /** The strict-reads deny decision fn (DAR-1106). Defaults to {@link decideStrictReads}. */
   decideStrictReads?: ReadDecision;
 }
 
@@ -95,8 +94,7 @@ export function dispatchHook(input: PreToolUseInput, options: DispatchOptions): 
       return secretFile;
     }
     if (options.strictReads) {
-      const decideStrictReads = options.decideStrictReads ?? declineRead;
-      return decideStrictReads(input);
+      return (options.decideStrictReads ?? decideStrictReads)(input);
     }
     return {};
   }

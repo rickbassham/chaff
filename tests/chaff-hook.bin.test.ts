@@ -105,6 +105,34 @@ describe('chaff-hook bin — denies secret-file reads end-to-end (DAR-1105 ac-1)
   });
 });
 
+describe('chaff-hook bin — --strict-reads denies read-family tools end-to-end (DAR-1106 ac-1, ac-3)', () => {
+  it("chaff-hook bin end-to-end: piping a Read PreToolUse JSON to the built bin with --strict-reads on argv writes a permissionDecision 'deny' JSON to stdout; the same input WITHOUT --strict-reads writes {} (no deny)", () => {
+    const withFlag = runHook(readJson('/repo/src/index.ts'), ['--strict-reads']);
+    expect(withFlag.status).toBe(0);
+    const out = JSON.parse(withFlag.stdout) as {
+      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string };
+    };
+    expect(out.hookSpecificOutput?.permissionDecision).toBe('deny');
+
+    const withoutFlag = runHook(readJson('/repo/src/index.ts'));
+    expect(withoutFlag.status).toBe(0);
+    expect(JSON.parse(withoutFlag.stdout)).toEqual({});
+  });
+
+  it('with --strict-reads on the chaff-hook bin argv, a Read PreToolUse input (non-secret-file path) produces a stdout JSON whose permissionDecision is `deny` and whose permissionDecisionReason steers the LLM to read via Bash cat/grep', () => {
+    const { stdout, status } = runHook(readJson('/repo/src/index.ts'), ['--strict-reads']);
+    expect(status).toBe(0);
+    const out = JSON.parse(stdout) as {
+      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string };
+    };
+    expect(out.hookSpecificOutput?.permissionDecision).toBe('deny');
+    const reason = out.hookSpecificOutput?.permissionDecisionReason ?? '';
+    expect(reason).toMatch(/\bBash\b/);
+    expect(reason).toMatch(/\bcat\b/);
+    expect(reason).toMatch(/\bgrep\b/);
+  });
+});
+
 describe('chaff-hook bin — end-to-end base64 round-trip (ac-3)', () => {
   it('a sample Bash command wrapped by the bin decodes back to the original command', () => {
     const sample = `curl -s -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models | jq '.data[].id'`;
