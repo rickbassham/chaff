@@ -193,8 +193,11 @@ export type TreeScanResult =
  * Run the working-tree scan end-to-end: fetch the broker's known values via
  * `CHAFF_SOCK`, then grep `cwd` for them. When `CHAFF_SOCK` is unset, returns a
  * `skipped` result rather than crashing (the common standalone `chaff scan`
- * case, where no session broker exists). Detective only — it returns findings;
- * it never throws to block the scan.
+ * case, where no session broker exists). A set-but-unreachable socket (a stale
+ * socket from a crashed prior session, or a broker that never answers) also
+ * degrades to `skipped` rather than rejecting — a detective scan must never fail
+ * the scan. Detective only — it returns findings; it never throws to block the
+ * scan.
  */
 export async function runTreeScan(options: RunTreeScanOptions): Promise<TreeScanResult> {
   if (options.sockPath === undefined || options.sockPath.length === 0) {
@@ -203,7 +206,15 @@ export async function runTreeScan(options: RunTreeScanOptions): Promise<TreeScan
       reason: 'CHAFF_SOCK is not set — no broker to read known secret values from',
     };
   }
-  const values = await fetchRedactionValues(options.sockPath);
+  let values: string[];
+  try {
+    values = await fetchRedactionValues(options.sockPath);
+  } catch {
+    return {
+      kind: 'skipped',
+      reason: 'broker unreachable — could not read known secret values',
+    };
+  }
   return { kind: 'ran', findings: scanTree({ values, root: options.cwd }) };
 }
 

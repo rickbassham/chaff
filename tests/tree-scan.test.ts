@@ -16,6 +16,7 @@ import {
   scanTree,
   fetchRedactionValues,
   formatTreeFindings,
+  runTreeScan,
   type TreeFinding,
 } from '../src/tree-scan.js';
 import { startBroker, type Broker } from '../src/broker.js';
@@ -101,6 +102,21 @@ describe('fetchRedactionValues — obtains known values from the broker (ac-2 in
     // need not even exist; if it does, it must never contain the secret value.
     if (existsSync(auditLogPath)) {
       expect(readFileSync(auditLogPath, 'utf8')).not.toContain(secret);
+    }
+  });
+});
+
+describe('runTreeScan — degrades, never fails the scan (ac-2, f-1)', () => {
+  it('degrades to a skipped result (not a rejection) when CHAFF_SOCK is set but points at a dead/non-listening socket — a detective scan must not fail the scan', async () => {
+    // A stale socket path from a crashed prior session: set, but nothing is
+    // listening, so fetchRedactionValues rejects. runTreeScan must swallow that
+    // and report a skip rather than propagating the rejection (which would set
+    // exit 1 in the bin and fail the whole `chaff scan`).
+    const deadSock = join(tmp, 'nonexistent.sock');
+    const result = await runTreeScan({ cwd: tmp, sockPath: deadSock });
+    expect(result.kind).toBe('skipped');
+    if (result.kind === 'skipped') {
+      expect(result.reason.toLowerCase()).toContain('broker unreachable');
     }
   });
 });
