@@ -16,13 +16,15 @@
  *
  * Committed ordering (2) per the approved contract: this issue wires the
  * *routing* of Read/Glob/Grep to the secret-file (DAR-1105) and `--strict-reads`
- * (DAR-1106) decision functions. The functions themselves are injected here so
- * the dispatch is gradeable today; their real pattern/deny logic lands in those
- * siblings. The dispatcher never fabricates a deny — it emits only what an
- * injected fn returns.
+ * (DAR-1106) decision functions. The secret-file fn defaults to the real
+ * {@link import('./secret-file.js').decideSecretFile} (DAR-1105); the
+ * `--strict-reads` fn is still injected (its real logic lands in DAR-1106).
+ * Either way the dispatcher never fabricates a deny — it emits only what the
+ * decision fn returns.
  */
 
 import { decideHookOutput, type HookOutput, type PreToolUseInput } from './hook.js';
+import { decideSecretFile } from './secret-file.js';
 
 /** The read-family tools whose reads route to the deny / strict-reads legs. */
 const READ_TOOLS = new Set(['Read', 'Glob', 'Grep']);
@@ -66,7 +68,7 @@ export interface DispatchOptions {
   strictReads: boolean;
   /** The Bash decision fn. Defaults to DAR-1104's {@link decideHookOutput}. */
   decideBash?: (input: PreToolUseInput) => HookOutput;
-  /** The secret-file deny decision fn (DAR-1105). Defaults to declining. */
+  /** The secret-file deny decision fn (DAR-1105). Defaults to {@link decideSecretFile}. */
   decideSecretFile?: ReadDecision;
   /** The strict-reads deny decision fn (DAR-1106). Defaults to declining. */
   decideStrictReads?: ReadDecision;
@@ -83,8 +85,8 @@ export function dispatchHook(input: PreToolUseInput, options: DispatchOptions): 
   }
 
   if (READ_TOOLS.has(input.tool_name)) {
-    const decideSecretFile = options.decideSecretFile ?? declineRead;
-    const secretFile = decideSecretFile(input);
+    const decideSecretFileFn = options.decideSecretFile ?? decideSecretFile;
+    const secretFile = decideSecretFileFn(input);
     // Decline contract: a read-decision fn declines by returning exactly `{}`
     // (no `hookSpecificOutput`). Any present `hookSpecificOutput` is treated as
     // a real decision and short-circuits the strict-reads leg, so the DAR-1105

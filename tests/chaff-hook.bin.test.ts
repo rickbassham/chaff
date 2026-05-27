@@ -46,6 +46,15 @@ function bashJson(command: string): string {
   });
 }
 
+/** A PreToolUse JSON string for a Read tool call targeting a path. */
+function readJson(file_path: string): string {
+  return JSON.stringify({
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Read',
+    tool_input: { file_path },
+  });
+}
+
 describe('chaff-hook bin — base64-wraps a Bash command end-to-end (ac-1)', () => {
   it("writing a PreToolUse JSON for a Bash 'ls -la' to stdin makes the bin print hookSpecificOutput.updatedInput.command = `chaff exec --b64 '<b64>'` and exit 0", () => {
     const { stdout, status } = runHook(bashJson('ls -la'));
@@ -81,6 +90,18 @@ describe('chaff-hook bin — base64-wraps a Bash command end-to-end (ac-1)', () 
     expect(status).not.toBe(0);
     expect(stderr).not.toBe('');
     expect(stdout).not.toContain('hookSpecificOutput');
+  });
+});
+
+describe('chaff-hook bin — denies secret-file reads end-to-end (DAR-1105 ac-1)', () => {
+  it("piping PreToolUse JSON for a Read of a `.env` path to the bin prints hookSpecificOutput.permissionDecision 'deny' with a permissionDecisionReason and exits 0", () => {
+    const { stdout, status } = runHook(readJson('/repo/.env'));
+    expect(status).toBe(0);
+    const out = JSON.parse(stdout) as {
+      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string };
+    };
+    expect(out.hookSpecificOutput?.permissionDecision).toBe('deny');
+    expect(out.hookSpecificOutput?.permissionDecisionReason?.length ?? 0).toBeGreaterThan(0);
   });
 });
 
