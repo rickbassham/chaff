@@ -135,6 +135,84 @@ _hostile_ process is out of scope; peer-cred + pid-tree gating (which would need
 a native addon) is noted as future hardening in
 [`PLAN.md`](./PLAN.md#1--broker-auth-filesystem-permissions-only-was-peer-cred--proc-audit).
 
+## Defense in depth: chaff is one control among several
+
+chaff narrows exactly one channel — the transcript — and by design neither
+confines the workload nor limits what a resolved credential can do. Two
+complementary controls are worth pairing it with.
+
+### Containers (host and network isolation)
+
+A fair question: how much of this does a container (Docker, etc.) already
+handle? Mostly a **different boundary** — the two are complementary, not
+substitutes.
+
+A container isolates the agent from the **host and the network**: unmounted
+files (`~/.ssh`, `~/.aws`, other repos) aren't reachable, a stray `rm -rf` can't
+escape, and `--network none` or an egress allowlist can stop arbitrary outbound
+connections. chaff isolates secrets from the **transcript** — the tool output and
+context sent to the model provider and persisted.
+
+The reason a container cannot replace chaff's core: the transcript → provider
+channel is **intended, authenticated traffic.** The agent must reach its provider
+to function, so you cannot close that channel with a network policy — and it is
+exactly the channel a leaked secret rides out on. Only keeping the raw value out
+of the readable env (Layer A) and scrubbing it from child output (Layer C) help
+there; a container has no hook into that traffic's content.
+
+Mapping the [four layers](#how-it-works-four-layers) onto a container:
+
+- **A / B / C — not replaceable.** A secret the child legitimately needs must be
+  present in the container to be used; once it is, `echo $KEY` still surfaces it
+  into the transcript. Container env is all-or-nothing (present and leakable, or
+  absent and unusable) — it has no equivalent of handles, per-child resolution,
+  or output scrubbing. The
+  [#1 residual gap](#1-residual-gap-open-disk-write--read-back-via-a-non-bash-tool)
+  survives inside a container for the same reason: the child holds the resolved
+  value, so it can still write it to a file and read it back.
+- **D's secret-file deny — a container does it better.** chaff's name-pattern
+  deny-list is a heuristic that misses arbitrary names; simply not mounting the
+  files removes them entirely.
+- **Threats chaff punts on — a container covers.**
+  [Determined exfiltration](#determined-exfiltration-by-chosen-code--out-of-scope)
+  is out of chaff's scope by design; an egress-restricted container is a real
+  control against it, as is host blast-radius containment.
+
+Bottom line: run the agent **in a container _and_ under chaff** — the container
+for host/network isolation, chaff for transcript hygiene on the one channel the
+container must leave open. Layers A/B/C are harness-agnostic, so they run inside
+a container unchanged.
+
+### Principle of least privilege (limit what a credential can do)
+
+chaff limits a secret's **visibility** — it never reaches the transcript — but
+by design it does not limit that secret's **power.** Per the
+[threat model](#threat-model), once a child resolves the real value chaff cannot
+police what the program does with it: a `DATABASE_URL` for a superuser role can
+still `DROP TABLE`, a full-access cloud key can still delete a bucket, with no
+human in the loop. chaff controls _who can see_ the key; least privilege controls
+_what the key can do._ Pair them.
+
+Scope every credential the agent's tools resolve to the least authority the task
+needs, so an accidental — or model-chosen — misuse has a bounded blast radius:
+
+- **Databases:** hand the agent a role scoped to the schema/tables it needs,
+  read-only where it can be, never a superuser/admin. A mistaken `DELETE`/`DROP`
+  then fails on permissions instead of destroying data. Use distinct credentials
+  per environment; never expose a prod-admin DSN to an agent session.
+- **Cloud / IAM:** grant specific actions on specific resources, not
+  `"Action": "*"` / `"Resource": "*"`; prefer short-lived (e.g. STS) credentials
+  that expire and can be revoked.
+- **API tokens:** use read-only or resource-scoped tokens rather than
+  full-access keys, and rotate them.
+- **Network:** combine with the container egress allowlist above, so even a
+  misused credential can only reach intended endpoints.
+
+The mindset: assume any secret an agent can use may eventually be used wrongly,
+and ensure that when it is, the damage is small and recoverable. This is the
+direct complement to chaff's bar — chaff shrinks the _chance_ of leakage, least
+privilege shrinks the _cost_ of misuse.
+
 ## Manual end-to-end check
 
 The unit and integration suites cover the mechanism in isolation, but the
